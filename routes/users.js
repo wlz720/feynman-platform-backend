@@ -27,7 +27,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// 登录【中文提示，登录成功返回token，逻辑不变】
+// 登录【中文提示，登录成功返回token + 用户基本信息】
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -46,7 +46,15 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' },
       (err, token) => {
         if (err) throw err;
-        res.json({ token });
+        // 修改：同时返回token和用户信息（不返回密码）
+        res.json({
+          token,
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email
+          }
+        });
       }
     );
   } catch (err) {
