@@ -1,13 +1,15 @@
 // 用法：在 feynman-platform-backend 目录下执行
-//   node scripts/check-qianfan.js          只测凭证能否调通文心模型
-//   node scripts/check-qianfan.js --full   再跑一次完整的「润色 + 评价」，验证 JSON 能被解析
+//   node scripts/check-qianfan.js                          只测凭证能否调通文心模型
+//   node scripts/check-qianfan.js --full                   再跑一次完整的「润色 + 评价」，验证 JSON 能被解析
+//   node scripts/check-qianfan.js --model ernie-speed-128k 临时指定模型名（新版 v2 接口常用）
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const axios = require('axios');
 
+const argModel = process.argv.indexOf('--model') > -1 ? process.argv[process.argv.indexOf('--model') + 1] : '';
 const API_KEY = process.env.QIANFAN_API_KEY || process.env.BAIDU_API_KEY || '';
 const SECRET_KEY = process.env.QIANFAN_SECRET_KEY || process.env.BAIDU_SECRET_KEY || '';
-const MODEL = process.env.QIANFAN_MODEL || '';
+const MODEL = argModel || process.env.QIANFAN_MODEL || '';
 const useBearer = API_KEY.startsWith('bce-v3/');
 
 const mask = (s) => (s.length <= 8 ? s : `${s.slice(0, 6)}***${s.slice(-4)}`);
