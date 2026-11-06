@@ -1,6 +1,6 @@
 # Feynman 学习平台 · 后端
 
-「费曼学习法」知识管理平台的 Node.js 后端：提供用户认证、知识点 CRUD 接口，并作为代理调用百度智能云短语音识别，把前端上传的录音转成文字。
+「费曼学习法」知识管理平台的 Node.js 后端：提供用户认证、知识点 CRUD 接口，代理调用百度智能云短语音识别把录音转成文字，并使用文心大模型对复述做润色与评分。
 
 ## 技术栈
 
@@ -11,6 +11,7 @@
 | 认证 | jsonwebtoken（JWT，7 天有效）+ bcryptjs |
 | 文件上传 | multer 2（memoryStorage，不落盘） |
 | 语音识别 | 百度智能云「短语音识别」HTTP 接口（axios 直接调用，未使用 SDK） |
+| 大模型 | 百度千帆 · 文心 ERNIE（axios 调用 REST 接口，Prompt 约束 JSON 输出） |
 
 ## 目录结构
 
@@ -23,8 +24,9 @@ middleware/auth.js              校验请求头 x-auth-token
 middleware/dbGuard.js           数据库未就绪时快速返回 503，区分网络异常与业务错误
 models/User.js                  用户模型
 models/KnowledgePoint.js        知识点模型
-controllers/baiduAiController.js  token 获取与缓存、调用百度识别、错误码映射
-scripts/check-baidu.js          凭证与接口自检工具
+controllers/baiduAiController.js  token 获取与缓存、调用百度识别、千帆润色与评价
+scripts/check-baidu.js          语音凭证与识别自检
+scripts/check-qianfan.js        千帆凭证、模型权限与完整评价链路自检
 ```
 
 ## 快速开始
@@ -45,8 +47,13 @@ node index.js            # http://localhost:3000
 | `PORT` | 服务端口，默认 3000 |
 | `BAIDU_API_KEY` | 百度智能云语音技术应用的 API Key |
 | `BAIDU_SECRET_KEY` | 同应用的 Secret Key |
+| `QIANFAN_API_KEY` | 千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
+| `QIANFAN_SECRET_KEY` | 千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
+| `QIANFAN_MODEL` | 可选。默认 `eb-instant`（v1 接口）/ `ernie-speed-128k`（bce-v3 接口） |
 
 百度凭证在控制台「语音技术 → 应用列表」中创建应用后获取，同一页面应同时出现 **AppID、API Key、Secret Key** 三项。注意不要使用「用户中心 → 安全认证」里的 AK/SK，那套无法换取 access_token。
+
+`QIANFAN_*` 留空时回退使用 `BAIDU_*`，对应课件里"语音与千帆共用同一个应用"的情况。但**语音技术和千帆是两个独立的服务权限**：语音应用默认没有文心模型的调用权限，需要在千帆控制台「应用接入 → 编辑应用 → 模型服务」里勾选模型，否则接口会返回 `error_code: 6`。
 
 ## 接口
 
@@ -63,6 +70,8 @@ node index.js            # http://localhost:3000
 | PUT | `/api/knowledge-points/:id` | 更新知识点 |
 | DELETE | `/api/knowledge-points/:id` | 删除知识点 |
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
+| POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText }`，返回润色、评价、优缺点与分数 |
+| POST | `/api/knowledge-points/:id/evaluate-result` | 请求体 `{ score }`，写回得分并按阈值更新 `reviewList` / `status` |
 
 ### 状态码约定
 
@@ -72,7 +81,8 @@ node index.js            # http://localhost:3000
 | 401 | 未携带或携带了无效的 `x-auth-token` |
 | 422 | 语音识别返回空结果 |
 | 500 | 服务端异常（非数据库连接问题） |
-| 503 | 数据库连接未就绪或查询超时 |
+| 502 | 上游（百度语音 / 千帆）调用失败或返回无法解析的内容 |
+| 503 | 数据库连接未就绪或查询超时；千帆凭证缺失或鉴权失败 |
 
 MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒；过去这段时间查询会一直挂着，最后抛 `MongooseServerSelectionError`，被路由统一按 500 返回，前端因此只能显示「登录失败，请检查邮箱和密码」，看起来像是密码错了。现在 `middleware/dbGuard.js` 会：
 
@@ -89,11 +99,21 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 3. **音频要求**：WAV/PCM、16000Hz、单声道、60 秒以内。前端已统一转码，直接调用本接口时需自行保证格式。
 4. **错误码**：`3301` 音频质量/格式问题、`3302` 鉴权失败、`3305` 音频过长、`3308` 未识别到内容，控制器已映射为中文提示。
 
+## AI 润色与评价实现要点
+
+1. **调用链路**：`POST /api/audio/evaluate` → 换取千帆 access_token（独立缓存）→ `POST {QIANFAN_CHAT_BASE}/{model}?access_token=…`，请求体 `{ messages: [{ role: 'user', content: prompt }], temperature: 0.2 }`。
+2. **Prompt 设计**：单个 user 消息里同时给出「角色设定 + 原始知识点 + 学生复述 + 三项任务 + JSON 字段模板」，把 `originalContent` 与 `transcribedText` 用代码块包起来，避免内容里的符号破坏指令结构。`temperature` 压到 0.2 是为了让输出更稳定。
+3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}` 再解析；`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串。`score` 不是数字时返回 502，而不是把 0 分写进数据库。
+4. **复习闭环**：`score < 60` 时 `POST /api/knowledge-points/:id/evaluate-result` 会把 `reviewList` 置为 `true`、`status` 置为 `need_review`，并记录 `lastScore` / `lastEvaluatedAt`；否则置为已掌握。
+5. **权限**：语音技术与千帆的权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。
+
 ### 自检
 
 ```bash
 node scripts/check-baidu.js              # 只验证密钥能否换到 token
 node scripts/check-baidu.js 音频.wav      # 再验证一次识别
+node scripts/check-qianfan.js            # 验证千帆凭证与模型权限
+node scripts/check-qianfan.js --full     # 跑完整「润色 + 评分」，并校验 JSON 可解析
 ```
 
 ## 说明

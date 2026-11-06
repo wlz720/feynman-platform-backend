@@ -20,6 +20,14 @@ const KnowledgePointSchema = new mongoose.Schema({
   reviewList: {
     type: Boolean,
     default: false
+  },
+  lastScore: {
+    type: Number,
+    default: null
+  },
+  lastEvaluatedAt: {
+    type: Date,
+    default: null
   }
 }, { timestamps: true });
 
