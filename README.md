@@ -75,7 +75,7 @@ node index.js            # http://localhost:3000
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
 | POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText, knowledgePointId? }`，返回润色、评价、优缺点、分数；带 `knowledgePointId` 时写回该知识点的 `lastAttempt` 与复习状态 |
 
-知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。存储的是原始 Markdown，不做服务端 HTML 转义（转义会破坏代码块），XSS 防护由前端 `react-markdown` 与 `DOMPurify` 负责。
+知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。写入前还会经过 `utils/sanitizeMarkdown.js` 做存储侧消毒：删除代码块之外的原始 HTML（`<script>`、`<iframe>`、带 `onerror` 的标签等），因此恶意载荷不会进入数据库；围栏代码块、行内代码、自动链接、引用块和 LaTeX 公式保持原样，避免把教学示例也一并删掉。渲染时前端还会用 `react-markdown` + `DOMPurify` 再消毒一次，形成「入库 + 渲染」两层防护。
 
 ### 状态码约定
 
@@ -119,7 +119,9 @@ node scripts/check-baidu.js 音频.wav      # 再验证一次识别
 node scripts/check-llm.js                # 验证当前配置的大模型能否调通
 node scripts/check-llm.js --full         # 跑完整「润色 + 评分」，并校验 JSON 可解析
 node scripts/check-llm.js --list         # 列出千帆 Key 可用的对话模型（仅 bce-v3）
-node scripts/check-llm.js --model glm-4.7-flash --full   # 临时指定模型名```
+node scripts/check-llm.js --model glm-4.7-flash --full   # 临时指定模型名
+node scripts/check-xss.js                # 验证入库消毒（代码块保留、恶意标签删除）
+node scripts/check-xss.js --db           # 只读扫描数据库，列出仍含原始 HTML 的旧记录```
 
 ## 说明
 
