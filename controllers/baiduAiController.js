@@ -260,7 +260,7 @@ function resolveGenericLlm() {
 
 async function callOpenAiCompatible({ baseUrl, apiKey, model }, prompt) {
   if (!model) {
-    const err = new Error('未配置 LLM_MODEL（例如 glm-4-flash）');
+    const err = new Error('未配置 LLM_MODEL（例如 glm-4.7-flash）');
     err.code = 'NO_CREDENTIAL';
     throw err;
   }

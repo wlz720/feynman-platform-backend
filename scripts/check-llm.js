@@ -2,7 +2,7 @@
 //   node scripts/check-llm.js                          测当前配置的大模型能否调通
 //   node scripts/check-llm.js --full                   再跑一次完整的「润色 + 评价」，验证 JSON 可解析
 //   node scripts/check-llm.js --list                   列出千帆 Key 可用的对话模型（仅 bce-v3）
-//   node scripts/check-llm.js --model glm-4-flash --full  临时指定模型名
+//   node scripts/check-llm.js --model glm-4.7-flash --full  临时指定模型名
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const axios = require('axios');
@@ -110,7 +110,7 @@ function extractJson(raw) {
     return;
   }
   if (useGeneric && !LLM_MODEL) {
-    console.log('\n使用第三方接口时必须配置 LLM_MODEL，例如 LLM_MODEL=glm-4-flash。');
+    console.log('\n使用第三方接口时必须配置 LLM_MODEL，例如 LLM_MODEL=glm-4.7-flash。');
     return;
   }
 
