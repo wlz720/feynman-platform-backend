@@ -1,7 +1,8 @@
 // 用法：在 feynman-platform-backend 目录下执行
 //   node scripts/check-qianfan.js                          只测凭证能否调通文心模型
 //   node scripts/check-qianfan.js --full                   再跑一次完整的「润色 + 评价」，验证 JSON 能被解析
-//   node scripts/check-qianfan.js --model ernie-speed-128k 临时指定模型名（新版 v2 接口常用）
+//   node scripts/check-qianfan.js --list                   列出当前 Key 可用的对话模型
+//   node scripts/check-qianfan.js --model ernie-5.1 --full 临时指定模型名
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const axios = require('axios');
@@ -54,7 +55,7 @@ async function chat(prompt) {
     const { data } = await axios.post(
       'https://qianfan.baidubce.com/v2/chat/completions',
       {
-        model: MODEL || 'ernie-speed-128k',
+        model: MODEL || 'ernie-5.1',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2
       },
@@ -77,7 +78,7 @@ async function chat(prompt) {
   console.log('API_KEY   :', mask(API_KEY), `(长度 ${API_KEY.length})`);
   console.log('SECRET_KEY:', SECRET_KEY ? `${mask(SECRET_KEY)} (长度 ${SECRET_KEY.length})` : '(未配置)');
   console.log('鉴权方式  :', useBearer ? 'Bearer（bce-v3 新版 API Key）' : 'access_token（应用接入 API Key/Secret）');
-  console.log('模型      :', MODEL || (useBearer ? 'ernie-speed-128k（默认）' : 'eb-instant（默认）'));
+  console.log('模型      :', MODEL || (useBearer ? 'ernie-5.1（默认）' : 'eb-instant（默认）'));
 
   if (!API_KEY) {
     console.log('\n.env 里没有 QIANFAN_API_KEY，也没有 BAIDU_API_KEY，先配置。');
@@ -85,6 +86,37 @@ async function chat(prompt) {
   }
   if (!useBearer && !SECRET_KEY) {
     console.log('\n走应用接入方式时必须同时有 QIANFAN_API_KEY 和 QIANFAN_SECRET_KEY。');
+    return;
+  }
+
+  if (process.argv.includes('--list')) {
+    if (!useBearer) {
+      console.log('\n--list 只适用于 bce-v3 新版 Key，旧版应用请到千帆控制台「模型服务」查看已开通模型。');
+      return;
+    }
+    let listResp;
+    try {
+      listResp = await axios.get('https://qianfan.baidubce.com/v2/models', {
+        headers: { Authorization: `Bearer ${API_KEY}` },
+        timeout: 20000
+      });
+    } catch (err) {
+      const status = err.response?.status;
+      console.log(
+        status === 429
+          ? '\n请求太频繁（429），等几十秒再执行。'
+          : `\n获取模型列表失败：HTTP ${status || '-'} ${JSON.stringify(err.response?.data || err.message)}`
+      );
+      return;
+    }
+    const chatModels = (listResp.data.data || []).filter(
+      (m) => m.status === 'active' && (m.type === 'chat' || m.type === 'multimodal')
+    );
+    console.log(`\n当前 Key 可用的对话模型（${chatModels.length} 个）：`);
+    chatModels.forEach((m) => console.log(`  ${m.id}  (${m.model_name})`));
+    if (chatModels.length) {
+      console.log(`\n把其中一个写进 .env，例如：QIANFAN_MODEL=${chatModels[0].id}`);
+    }
     return;
   }
 

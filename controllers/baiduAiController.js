@@ -230,6 +230,7 @@ function normalizeFeedback(obj) {
 
 const QIANFAN_ERROR_HINTS = {
   6: '千帆应用没有该模型权限，请在千帆控制台的「应用接入 → 模型服务」里勾选文心模型后重试',
+  invalid_model: '模型名不可用或当前 Key 没有该模型权限，可执行 node scripts/check-qianfan.js --list 查看可用模型',
   110: '千帆 access_token 无效，请检查 api_key / secret_key 是否属于同一个应用',
   111: '千帆 access_token 已过期，请重新获取',
   17: '千帆接口调用量已达每日上限',
@@ -250,7 +251,7 @@ async function callChatModel(prompt) {
     const { data } = await axios.post(
       QIANFAN_V2_CHAT_URL,
       {
-        model: process.env.QIANFAN_MODEL || 'ernie-speed-128k',
+        model: process.env.QIANFAN_MODEL || 'ernie-5.1',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2
       },
@@ -314,10 +315,15 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
     if (err.code === 'ERR_BAD_RESPONSE' || err.response?.status) {
       const status = err.response?.status;
       const body = err.response?.data || {};
+      // v1 用 error_code/error_msg，v2 用 error.code/error.message
+      const upstreamCode = body.error_code || body.error?.code;
+      const upstreamMsg = body.error_msg || body.error?.message;
       console.error('千帆接口异常：', status, body);
       return res.status(502).json({
-        msg: QIANFAN_ERROR_HINTS[body.error_code] || `调用千帆大模型失败（HTTP ${status}）`,
-        error: { error_code: body.error_code, error_msg: body.error_msg }
+        msg:
+          QIANFAN_ERROR_HINTS[upstreamCode] ||
+          `调用千帆大模型失败（HTTP ${status}）${upstreamMsg ? '：' + upstreamMsg : ''}`,
+        error: { error_code: upstreamCode, error_msg: upstreamMsg }
       });
     }
     if (detail.error_code) {

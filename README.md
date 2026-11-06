@@ -49,7 +49,7 @@ node index.js            # http://localhost:3000
 | `BAIDU_SECRET_KEY` | 同应用的 Secret Key |
 | `QIANFAN_API_KEY` | 千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
 | `QIANFAN_SECRET_KEY` | 千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
-| `QIANFAN_MODEL` | 可选。默认 `eb-instant`（v1 接口）/ `ernie-speed-128k`（bce-v3 接口） |
+| `QIANFAN_MODEL` | 可选。模型名，v1 接口默认 `eb-instant`，bce-v3 接口默认 `ernie-5.1` |
 
 百度凭证在控制台「语音技术 → 应用列表」中创建应用后获取，同一页面应同时出现 **AppID、API Key、Secret Key** 三项。注意不要使用「用户中心 → 安全认证」里的 AK/SK，那套无法换取 access_token。
 
@@ -105,7 +105,7 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 2. **Prompt 设计**：单个 user 消息里同时给出「角色设定 + 原始知识点 + 学生复述 + 三项任务 + JSON 字段模板」，把 `originalContent` 与 `transcribedText` 用代码块包起来，避免内容里的符号破坏指令结构。`temperature` 压到 0.2 是为了让输出更稳定。
 3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}` 再解析；`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串。`score` 不是数字时返回 502，而不是把 0 分写进数据库。
 4. **复习闭环**：`score < 60` 时 `POST /api/knowledge-points/:id/evaluate-result` 会把 `reviewList` 置为 `true`、`status` 置为 `need_review`，并记录 `lastScore` / `lastEvaluatedAt`；否则置为已掌握。
-5. **权限**：语音技术与千帆的权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。
+5. **权限与模型名**：语音技术与千帆的权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`，可用 `node scripts/check-qianfan.js --list` 查看当前 Key 有哪些可用。
 
 ### 自检
 
@@ -113,6 +113,7 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 node scripts/check-baidu.js              # 只验证密钥能否换到 token
 node scripts/check-baidu.js 音频.wav      # 再验证一次识别
 node scripts/check-qianfan.js            # 验证千帆凭证与模型权限
+node scripts/check-qianfan.js --list     # 列出当前 Key 可用的对话模型（bce-v3）
 node scripts/check-qianfan.js --full     # 跑完整「润色 + 评分」，并校验 JSON 可解析
 ```
 
