@@ -49,7 +49,7 @@ node index.js            # http://localhost:3000
 | `BAIDU_SECRET_KEY` | 同应用的 Secret Key |
 | `LLM_BASE_URL` | 大模型接口地址（OpenAI 兼容），如 `https://open.bigmodel.cn/api/paas/v4` |
 | `LLM_API_KEY` | 上面对应服务商的 API Key |
-| `LLM_MODEL` | 模型名，如 `glm-4.7-flash`（也可用 `glm-4-flash`）；三项都填时优先走这条通道 |
+| `LLM_MODEL` | 模型名，如 `glm-4-flash`（高峰期限流时可换 `glm-4.7-flash`）；三项都填时优先走这条通道 |
 | `QIANFAN_API_KEY` | 可选。千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
 | `QIANFAN_SECRET_KEY` | 可选。千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
 | `QIANFAN_MODEL` | 可选。模型名，v1 接口默认 `eb-instant`，bce-v3 接口默认 `ernie-5.1` |
@@ -117,8 +117,7 @@ node scripts/check-baidu.js 音频.wav      # 再验证一次识别
 node scripts/check-llm.js                # 验证当前配置的大模型能否调通
 node scripts/check-llm.js --full         # 跑完整「润色 + 评分」，并校验 JSON 可解析
 node scripts/check-llm.js --list         # 列出千帆 Key 可用的对话模型（仅 bce-v3）
-node scripts/check-llm.js --model glm-4.7-flash --full   # 临时指定模型名
-```
+node scripts/check-llm.js --model glm-4.7-flash --full   # 临时指定模型名```
 
 ## 说明
 

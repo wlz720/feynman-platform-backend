@@ -39,7 +39,8 @@ const HINTS = {
   invalid_api_key: ['API Key 无效，检查 .env 里的 LLM_API_KEY 是否复制完整、是否已被删除。'],
   insufficient_quota: ['免费额度已用完，换个账号/Key 或充值。'],
   insufficient_balance: ['账户余额不足。'],
-  rate_limit_exceeded: ['请求过于频繁（429），等十几秒再试。']
+  rate_limit_exceeded: ['请求过于频繁（429），等十几秒再试。'],
+  1305: ['智谱免费模型当前访问量过大（1305），等一会儿再试，或换 glm-4-flash / glm-4.7-flash 中较空闲的那个。']
 };
 
 const hint = (code) => HINTS[code] || [`未知错误码 ${code || '(空)'}，把上面的原始返回发出来再排查。`];

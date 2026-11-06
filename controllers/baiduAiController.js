@@ -241,6 +241,7 @@ const LLM_ERROR_HINTS = {
   insufficient_quota: '免费额度已用完或账户余额不足，请更换 Key 或充值',
   insufficient_balance: '账户余额不足，请充值后重试',
   rate_limit_exceeded: '请求过于频繁，请稍后重试',
+  1305: '免费模型当前访问量过大（智谱 1305），请稍后重试或改用 glm-4-flash',
   110: '千帆 access_token 无效，请检查 api_key / secret_key 是否属于同一个应用',
   111: '千帆 access_token 已过期，请重新获取',
   17: '千帆接口调用量已达每日上限',
