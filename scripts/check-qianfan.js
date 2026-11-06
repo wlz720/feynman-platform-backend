@@ -21,6 +21,12 @@ const HINTS = {
     '去千帆控制台 → 应用接入 → 编辑应用 → 模型服务，勾选要用的文心模型（如 ERNIE-Bot-turbo / ERNIE-Speed），保存后重试。',
     '语音技术应用默认不带大模型权限，必须单独在千帆开通。'
   ],
+  invalid_model: ['模型名不可用或该 Key 没有此模型权限，执行 node scripts/check-qianfan.js --list 查看可用模型。'],
+  account_overdue: [
+    '百度智能云账户处于欠费/受限状态，服务端直接拒绝请求。',
+    '去 https://console.bce.baidu.com/finance/ 查看是否欠费，按提示充值（几元即可恢复）；',
+    '再到千帆控制台确认已「开通付费」或领取了免费额度。充值后重新执行本脚本即可。'
+  ],
   110: ['access_token 无效：API Key 与 Secret Key 不属于同一个应用，或复制不全。'],
   111: ['access_token 已过期，重新执行本脚本即可（服务端会自动换新的）。'],
   17: ['当日调用量已达上限，明天再试或换更便宜的模型。'],
@@ -133,12 +139,10 @@ async function chat(prompt) {
     console.log('成功！模型回复：', String(text).trim().slice(0, 60));
   } catch (err) {
     const data = err.detail || err.response?.data || {};
+    const code = data.error_code || data.error?.code;
     console.log('失败：', err.message);
     console.log('原始返回：', JSON.stringify(data).slice(0, 400));
-    if (data.error) {
-      console.log('👉 鉴权失败：请确认 API Key / Secret Key 来自同一个千帆应用。');
-    }
-    if (data.error_code) hint(data.error_code).forEach((l) => console.log('  ' + l));
+    if (code) hint(code).forEach((l) => console.log('  ' + l));
     return;
   }
 
