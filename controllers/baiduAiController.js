@@ -170,6 +170,42 @@ async function getQianfanAccessToken() {
   return pendingQianfanToken;
 }
 
+// 润色单独走一次请求，且只给它「学生原话」——不给知识点正文，
+// 否则模型很容易照着标准答案重写，而不是润色学生说的内容。
+function buildPolishPrompt(transcribedText, originalContent) {
+  return `你是中文语音转写校对员。请只对学生口述的文本做“语言润色”，不要回答问题、不要讲解知识。
+
+【学生口述（语音识别结果）】
+\`\`\`
+${transcribedText}
+\`\`\`
+
+润色规则（严格遵守）：
+1. 只改表达，不改意思：去掉口头禅和重复词，补标点，理顺语序。
+2. 可以按读音纠正明显的识别错字（例如把同音词改成正确的专业名词），但不要改变学生原本的观点。
+3. 学生说得不完整、说错了、甚至完全没听懂，都必须原样保留这种状态，不要替他补全或纠正。
+4. 禁止引入【原始知识点】里的定义、结论或表述；禁止添加学生没说过的新信息。
+5. 润色后的长度应当和原话接近，最多略长；如果会明显变长，说明你在补充知识，请停下重写。
+
+【原始知识点（仅供判断专业名词用，禁止照抄）】
+\`\`\`
+${originalContent}
+\`\`\`
+
+只输出润色后的这一段文字，不要加引号、不要解释、不要 JSON。`;
+}
+
+function cleanPolishedText(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .trim()
+    .replace(/^```(?:text|markdown)?\s*/i, '')
+    .replace(/```$/, '')
+    .replace(/^(润色后(的文本|结果)?|润色版|修改后)[：:]\s*/u, '')
+    .replace(/^["“「](.*)["”」]$/s, '$1')
+    .trim();
+}
+
 function buildEvaluatePrompt(originalContent, transcribedText) {
   return `你是一个严格而友善的计算机科学学习教练。你的任务是评估学生对一个知识点的复述，并给出反馈。
 
@@ -184,14 +220,15 @@ ${transcribedText}
 \`\`\`
 
 请你完成以下三项任务:
-1. **文本润色**: 将学生的复述文本润色成一段通顺、专业、书面化的文字。修正明显的语法错误和口语化表达，但保持其核心观点不变。
-2. **综合评价**: 基于原始知识点，对学生的复述进行评价。指出其优点和可以改进的地方。
+1. **综合评价**: 基于原始知识点，对学生的复述进行评价。指出其优点和可以改进的地方。如果复述与知识点无关或明显错误，要直接指出。
+2. **优点**: 列出学生做得好的地方；确实没有优点时返回空数组。
 3. **评分**: 综合考虑准确性、完整性、逻辑性和流畅性，给出一个0到100的整数分数。
+
+注意：本次不要润色学生文本，润色由另一个环节单独完成，你只负责评价和打分。
 
 请严格按照以下JSON格式返回你的结果，不要包含任何额外的解释或文字。
 各字段用纯中文文本填写：不要使用 LaTeX 或反斜杠转义，字符串内部不要出现真实换行（需要分行请用中文逗号或分号）。
 {
-  "polishedText": "这里是润色后的文本",
   "evaluation": "这里是你的综合评价",
   "strengths": ["优点1", "优点2"],
   "weaknesses": ["可以改进的地方1", "可以改进的地方2"],
@@ -432,6 +469,26 @@ async function callChatModel(prompt) {
   return data.result;
 }
 
+async function requestEvaluationJson(prompt) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const raw = await callChatModel(
+      attempt === 0
+        ? prompt
+        : `${prompt}\n\n上一次返回的内容不是合法 JSON。请重新输出，只输出一个 JSON 对象，不要代码块、不要解释，字符串内不要有换行和反斜杠。`
+    );
+    try {
+      return parseLlmJson(raw);
+    } catch (parseErr) {
+      lastErr = parseErr;
+      console.error(`模型返回内容解析失败（第 ${attempt + 1} 次）：`, parseErr.message);
+    }
+  }
+  const err = new Error(lastErr?.message || '模型返回内容无法解析');
+  err.code = 'BAD_LLM_JSON';
+  throw err;
+}
+
 exports.evaluateFeynmanAttempt = async (req, res) => {
   const { originalContent, transcribedText, knowledgePointId } = req.body || {};
 
@@ -464,27 +521,17 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
       }
     }
 
-    const prompt = buildEvaluatePrompt(originalContent, transcribedText);
-    let feedback = null;
-    let lastJsonError = null;
-    for (let attempt = 0; attempt < 2 && !feedback; attempt += 1) {
-      const raw = await callChatModel(
-        attempt === 0
-          ? prompt
-          : `${prompt}\n\n上一次返回的内容不是合法 JSON。请重新输出，只输出一个 JSON 对象，不要代码块、不要解释，字符串内不要有换行和反斜杠。`
-      );
-      try {
-        feedback = normalizeFeedback(parseLlmJson(raw));
-      } catch (parseErr) {
-        lastJsonError = parseErr;
-        console.error(`模型返回内容解析失败（第 ${attempt + 1} 次）：`, parseErr.message);
-      }
-    }
-    if (!feedback) {
-      const err = new Error(lastJsonError?.message || '模型返回内容无法解析');
-      err.code = 'BAD_LLM_JSON';
-      throw err;
-    }
+    // 润色与评价各走一次请求、并行执行：润色只看学生原话，评价才带知识点，
+    // 这样模型不会把「润色」做成「照着标准答案重写」。
+    const [polishedRaw, evalObj] = await Promise.all([
+      callChatModel(buildPolishPrompt(transcribedText, originalContent)).catch((polishErr) => {
+        console.error('润色请求失败，回退使用原文本：', polishErr.message);
+        return '';
+      }),
+      requestEvaluationJson(buildEvaluatePrompt(originalContent, transcribedText))
+    ]);
+    const polishedText = cleanPolishedText(polishedRaw) || transcribedText.trim();
+    const feedback = normalizeFeedback({ ...evalObj, polishedText });
 
     let saved = null;
     if (targetKp) {
