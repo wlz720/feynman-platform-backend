@@ -1,6 +1,6 @@
 # Feynman 学习平台 · 后端
 
-「费曼学习法」知识管理平台的 Node.js 后端：提供用户认证、知识点 CRUD 接口，代理调用百度智能云短语音识别把录音转成文字，并使用文心大模型对复述做润色与评分。
+「费曼学习法」知识管理平台的 Node.js 后端：提供用户认证、知识点 CRUD 接口，代理调用百度智能云短语音识别把录音转成文字，并使用大模型对复述做润色与评分。
 
 ## 技术栈
 
@@ -11,7 +11,7 @@
 | 认证 | jsonwebtoken（JWT，7 天有效）+ bcryptjs |
 | 文件上传 | multer 2（memoryStorage，不落盘） |
 | 语音识别 | 百度智能云「短语音识别」HTTP 接口（axios 直接调用，未使用 SDK） |
-| 大模型 | 百度千帆 · 文心 ERNIE（axios 调用 REST 接口，Prompt 约束 JSON 输出） |
+| 大模型 | OpenAI 兼容接口（默认智谱 `glm-4-flash`，也可切到硅基流动 / 千帆文心；axios 调用，Prompt 约束 JSON 输出） |
 
 ## 目录结构
 
@@ -24,9 +24,9 @@ middleware/auth.js              校验请求头 x-auth-token
 middleware/dbGuard.js           数据库未就绪时快速返回 503，区分网络异常与业务错误
 models/User.js                  用户模型
 models/KnowledgePoint.js        知识点模型
-controllers/baiduAiController.js  token 获取与缓存、调用百度识别、千帆润色与评价
+controllers/baiduAiController.js  token 获取与缓存、百度识别、大模型润色与评价
 scripts/check-baidu.js          语音凭证与识别自检
-scripts/check-qianfan.js        千帆凭证、模型权限与完整评价链路自检
+scripts/check-llm.js            大模型凭证、模型权限与完整评价链路自检
 ```
 
 ## 快速开始
@@ -47,13 +47,16 @@ node index.js            # http://localhost:3000
 | `PORT` | 服务端口，默认 3000 |
 | `BAIDU_API_KEY` | 百度智能云语音技术应用的 API Key |
 | `BAIDU_SECRET_KEY` | 同应用的 Secret Key |
-| `QIANFAN_API_KEY` | 千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
-| `QIANFAN_SECRET_KEY` | 千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
+| `LLM_BASE_URL` | 大模型接口地址（OpenAI 兼容），如 `https://open.bigmodel.cn/api/paas/v4` |
+| `LLM_API_KEY` | 上面对应服务商的 API Key |
+| `LLM_MODEL` | 模型名，如 `glm-4-flash`；三项都填时优先走这条通道 |
+| `QIANFAN_API_KEY` | 可选。千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
+| `QIANFAN_SECRET_KEY` | 可选。千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
 | `QIANFAN_MODEL` | 可选。模型名，v1 接口默认 `eb-instant`，bce-v3 接口默认 `ernie-5.1` |
 
-百度凭证在控制台「语音技术 → 应用列表」中创建应用后获取，同一页面应同时出现 **AppID、API Key、Secret Key** 三项。注意不要使用「用户中心 → 安全认证」里的 AK/SK，那套无法换取 access_token。
+百度语音凭证在控制台「语音技术 → 应用列表」中创建应用后获取，同一页面应同时出现 **AppID、API Key、Secret Key** 三项。注意不要使用「用户中心 → 安全认证」里的 AK/SK，那套无法换取 access_token。
 
-`QIANFAN_*` 留空时回退使用 `BAIDU_*`，对应课件里"语音与千帆共用同一个应用"的情况。但**语音技术和千帆是两个独立的服务权限**：语音应用默认没有文心模型的调用权限，需要在千帆控制台「应用接入 → 编辑应用 → 模型服务」里勾选模型，否则接口会返回 `error_code: 6`。
+只要 `LLM_BASE_URL + LLM_API_KEY + LLM_MODEL` 都填了，就直接走第三方 OpenAI 兼容接口（可用有免费额度的模型）；否则回落到千帆。千帆的 `QIANFAN_*` 留空时再回退使用 `BAIDU_*`，对应课件里"语音与千帆共用同一个应用"的情况。但**语音技术和千帆是两个独立的服务权限**：语音应用默认没有文心模型的调用权限，需要在千帆控制台「应用接入 → 编辑应用 → 模型服务」里勾选模型，否则接口会返回 `error_code: 6`。
 
 ## 接口
 
@@ -80,8 +83,8 @@ node index.js            # http://localhost:3000
 | 401 | 未携带或携带了无效的 `x-auth-token` |
 | 422 | 语音识别返回空结果 |
 | 500 | 服务端异常（非数据库连接问题） |
-| 502 | 上游（百度语音 / 千帆）调用失败或返回无法解析的内容 |
-| 503 | 数据库连接未就绪或查询超时；千帆凭证缺失或鉴权失败 |
+| 502 | 上游（百度语音 / 大模型）调用失败或返回无法解析的内容 |
+| 503 | 数据库连接未就绪或查询超时；大模型凭证缺失或鉴权失败 |
 
 MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒；过去这段时间查询会一直挂着，最后抛 `MongooseServerSelectionError`，被路由统一按 500 返回，前端因此只能显示「登录失败，请检查邮箱和密码」，看起来像是密码错了。现在 `middleware/dbGuard.js` 会：
 
@@ -100,20 +103,21 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 
 ## AI 润色与评价实现要点
 
-1. **调用链路**：`POST /api/audio/evaluate` → 换取千帆 access_token（独立缓存）→ `POST {QIANFAN_CHAT_BASE}/{model}?access_token=…`，请求体 `{ messages: [{ role: 'user', content: prompt }], temperature: 0.2 }`。
+1. **调用链路**：`POST /api/audio/evaluate` → `callChatModel()`。配置了 `LLM_BASE_URL + LLM_API_KEY + LLM_MODEL` 时走 `POST {LLM_BASE_URL}/chat/completions`（`Authorization: Bearer`）；否则走千帆：`bce-v3` Key 用 `/v2/chat/completions`，应用接入用 access_token（独立缓存）。请求体都是 `{ model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }`。
 2. **Prompt 设计**：单个 user 消息里同时给出「角色设定 + 原始知识点 + 学生复述 + 三项任务 + JSON 字段模板」，把 `originalContent` 与 `transcribedText` 用代码块包起来，避免内容里的符号破坏指令结构。`temperature` 压到 0.2 是为了让输出更稳定。
 3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}` 再解析；`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串。`score` 不是数字时返回 502，而不是把 0 分写进数据库。
 4. **结果落库**：请求带 `knowledgePointId` 时，控制器在调用模型前先校验该知识点存在且属于当前用户（避免白发一次模型请求），评价成功后把 `transcribedText / polishedText / evaluation / strengths / weaknesses / score / createdAt` 整体写入 `KnowledgePoint.lastAttempt`，并按 `score < 60` 更新 `reviewList` 与 `status`。落库失败不会吞掉评价结果，接口仍返回反馈并给出 `saved: null`。详情页直接读 `GET /api/knowledge-points/:id` 里的 `lastAttempt`，不需要再问一次模型。
-5. **权限与模型名**：语音技术与千帆的权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`，可用 `node scripts/check-qianfan.js --list` 查看当前 Key 有哪些可用。
+5. **权限与模型名**：语音技术的权限与大模型权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`；可用 `node scripts/check-llm.js --list` 查看当前 Key 有哪些可用。千帆账户欠费时服务端会返回 `account_overdue`，此时可改用有免费额度的 OpenAI 兼容服务（见上文的 `LLM_*`）。
 
 ### 自检
 
 ```bash
-node scripts/check-baidu.js              # 只验证密钥能否换到 token
+node scripts/check-baidu.js              # 只验证语音密钥能否换到 token
 node scripts/check-baidu.js 音频.wav      # 再验证一次识别
-node scripts/check-qianfan.js            # 验证千帆凭证与模型权限
-node scripts/check-qianfan.js --list     # 列出当前 Key 可用的对话模型（bce-v3）
-node scripts/check-qianfan.js --full     # 跑完整「润色 + 评分」，并校验 JSON 可解析
+node scripts/check-llm.js                # 验证当前配置的大模型能否调通
+node scripts/check-llm.js --full         # 跑完整「润色 + 评分」，并校验 JSON 可解析
+node scripts/check-llm.js --list         # 列出千帆 Key 可用的对话模型（仅 bce-v3）
+node scripts/check-llm.js --model glm-4-flash --full   # 临时指定模型名
 ```
 
 ## 说明

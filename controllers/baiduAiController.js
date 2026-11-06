@@ -231,11 +231,16 @@ function normalizeFeedback(obj) {
   };
 }
 
-const QIANFAN_ERROR_HINTS = {
+const LLM_ERROR_HINTS = {
   6: '千帆应用没有该模型权限，请在千帆控制台的「应用接入 → 模型服务」里勾选文心模型后重试',
-  invalid_model: '模型名不可用或当前 Key 没有该模型权限，可执行 node scripts/check-qianfan.js --list 查看可用模型',
-  account_overdue: '百度智能云账户已欠费或被限制，请到「财务中心」充值或领取免费额度后再试',
-  access_denied: '该 Key 没有访问权限，请检查千帆控制台里 API Key 的模型权限配置',
+  invalid_model: '模型名不可用或当前 Key 没有该模型权限，可执行 node scripts/check-llm.js --list 查看可用模型',
+  model_not_found: '模型名不存在，请检查 .env 里的 LLM_MODEL',
+  account_overdue: '账户已欠费或被限制，请到服务商控制台充值或领取免费额度后再试',
+  access_denied: '该 Key 没有访问权限，请检查控制台里的模型权限配置',
+  invalid_api_key: 'API Key 无效或已过期，请检查 .env 里的 LLM_API_KEY',
+  insufficient_quota: '免费额度已用完或账户余额不足，请更换 Key 或充值',
+  insufficient_balance: '账户余额不足，请充值后重试',
+  rate_limit_exceeded: '请求过于频繁，请稍后重试',
   110: '千帆 access_token 无效，请检查 api_key / secret_key 是否属于同一个应用',
   111: '千帆 access_token 已过期，请重新获取',
   17: '千帆接口调用量已达每日上限',
@@ -244,10 +249,54 @@ const QIANFAN_ERROR_HINTS = {
   336502: '千帆请求过于频繁，请稍后重试'
 };
 
+// 通用 OpenAI 兼容接口（智谱、硅基流动、通义、DeepSeek 等都用这个协议），
+// 配了 LLM_BASE_URL + LLM_API_KEY 就优先走这里，不再依赖千帆。
+function resolveGenericLlm() {
+  const baseUrl = (process.env.LLM_BASE_URL || '').trim().replace(/\/+$/, '');
+  const apiKey = (process.env.LLM_API_KEY || '').trim();
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl, apiKey, model: (process.env.LLM_MODEL || '').trim() };
+}
+
+async function callOpenAiCompatible({ baseUrl, apiKey, model }, prompt) {
+  if (!model) {
+    const err = new Error('未配置 LLM_MODEL（例如 glm-4-flash）');
+    err.code = 'NO_CREDENTIAL';
+    throw err;
+  }
+  const { data } = await axios.post(
+    `${baseUrl}/chat/completions`,
+    {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2
+    },
+    {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 60000
+    }
+  );
+  if (data.error) {
+    const err = new Error(data.error.message || '模型接口返回错误');
+    err.llm = data.error;
+    throw err;
+  }
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('模型没有返回内容');
+  }
+  return content;
+}
+
 async function callChatModel(prompt) {
+  const generic = resolveGenericLlm();
+  if (generic) {
+    return callOpenAiCompatible(generic, prompt);
+  }
+
   const { apiKey, useBearer } = resolveQianfanCredential();
   if (!apiKey) {
-    const err = new Error('未配置千帆凭证');
+    const err = new Error('未配置大模型凭证：请设置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL，或配置千帆 QIANFAN_*');
     err.code = 'NO_CREDENTIAL';
     throw err;
   }
@@ -355,24 +404,32 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
     if (err.code === 'NO_CREDENTIAL') {
       return res.status(503).json({ msg: err.message + '，请在 .env 中配置后重启后端' });
     }
+    if (err.llm) {
+      // 通用 OpenAI 兼容接口在 200 里返回 error
+      console.error('模型接口返回错误：', err.llm);
+      return res.status(502).json({
+        msg: LLM_ERROR_HINTS[err.llm.code] || `模型接口返回错误：${err.llm.message || err.llm.code}`,
+        error: { error_code: err.llm.code, error_msg: err.llm.message }
+      });
+    }
     if (err.code === 'ERR_BAD_RESPONSE' || err.response?.status) {
       const status = err.response?.status;
       const body = err.response?.data || {};
-      // v1 用 error_code/error_msg，v2 用 error.code/error.message
+      // 千帆 v1 用 error_code/error_msg，v2 与 OpenAI 兼容接口用 error.code/error.message
       const upstreamCode = body.error_code || body.error?.code;
       const upstreamMsg = body.error_msg || body.error?.message;
-      console.error('千帆接口异常：', status, body);
+      console.error('模型接口异常：', status, body);
       return res.status(502).json({
         msg:
-          QIANFAN_ERROR_HINTS[upstreamCode] ||
-          `调用千帆大模型失败（HTTP ${status}）${upstreamMsg ? '：' + upstreamMsg : ''}`,
+          LLM_ERROR_HINTS[upstreamCode] ||
+          `调用大模型失败（HTTP ${status}）${upstreamMsg ? '：' + upstreamMsg : ''}`,
         error: { error_code: upstreamCode, error_msg: upstreamMsg }
       });
     }
     if (detail.error_code) {
       console.error('千帆返回错误：', detail.error_code, detail.error_msg);
       return res.status(502).json({
-        msg: QIANFAN_ERROR_HINTS[detail.error_code] || `千帆返回错误：${detail.error_msg || detail.error_code}`,
+        msg: LLM_ERROR_HINTS[detail.error_code] || `千帆返回错误：${detail.error_msg || detail.error_code}`,
         error: { error_code: detail.error_code, error_msg: detail.error_msg }
       });
     }
