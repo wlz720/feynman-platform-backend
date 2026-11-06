@@ -21,7 +21,8 @@ const { requireDb } = require('./middleware/dbGuard');
 
 // 中间件
 app.use(cors());
-app.use(express.json());
+// 知识点正文上限 10 万字，中文按 UTF-8 约 300KB，默认的 100kb 会在校验前先报 413
+app.use(express.json({ limit: '1mb' }));
 
 // MongoDB连接（Atlas 偶尔选节点很慢，给足超时并在首次失败时重试）
 const MONGO_OPTIONS = {
@@ -53,6 +54,17 @@ app.use('/api/audio', audioRouter);
 // 健康检查接口
 app.get('/', (req, res) => {
   res.send('Hello, Feynman Learner!');
+});
+
+// body-parser 的错误默认返回 HTML，这里统一成前端能展示的 JSON
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ msg: '内容过大，请精简后再保存' });
+  }
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ msg: '请求体不是合法的 JSON' });
+  }
+  return next(err);
 });
 
 // 启动服务
