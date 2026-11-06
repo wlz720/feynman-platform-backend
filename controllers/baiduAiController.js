@@ -189,6 +189,7 @@ ${transcribedText}
 3. **评分**: 综合考虑准确性、完整性、逻辑性和流畅性，给出一个0到100的整数分数。
 
 请严格按照以下JSON格式返回你的结果，不要包含任何额外的解释或文字。
+各字段用纯中文文本填写：不要使用 LaTeX 或反斜杠转义，字符串内部不要出现真实换行（需要分行请用中文逗号或分号）。
 {
   "polishedText": "这里是润色后的文本",
   "evaluation": "这里是你的综合评价",
@@ -198,10 +199,86 @@ ${transcribedText}
 }`;
 }
 
-// 模型经常把 JSON 包在 ```json 代码块里，或前后带一句解释，这里做容错提取
+// 模型经常把 JSON 包在 ```json 代码块里，或前后带一句解释，这里做容错提取。
+// 中文模型还常犯两类错：字符串里直接换行（未转义控制字符）、把反斜杠写进正文（非法转义），
+// 所以先逐字符修复再交给 JSON.parse，修不好再交给上层重试。
+function repairJsonText(text) {
+  let out = '';
+  let inString = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (!inString) {
+      out += ch;
+      if (ch === '"') inString = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      out += ch;
+      inString = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === undefined) {
+        out += '\\\\';
+        continue;
+      }
+      if (next === 'u') {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += `\\u${hex}`;
+          i += 5;
+        } else {
+          out += '\\\\';
+        }
+        continue;
+      }
+      // \frac、\text、\theta 这类是模型写公式时的 LaTeX，按普通文本保留反斜杠
+      if (/[a-zA-Z]/.test(next) && /[a-zA-Z]/.test(text[i + 2] || '')) {
+        out += '\\\\';
+        continue;
+      }
+      // \( \) \[ \] 是模型写公式时的高频产物，去掉反斜杠即可
+      if ('()[]'.includes(next)) {
+        out += next;
+        i += 1;
+        continue;
+      }
+      if ('"\\/bfnrt'.includes(next)) {
+        out += `\\${next}`;
+        i += 1;
+        continue;
+      }
+      // 其余（\frac、\text 之类）一律转义成普通反斜杠
+      out += '\\\\';
+      continue;
+    }
+
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) {
+      if (ch === '\n') out += '\\n';
+      else if (ch === '\r') out += '\\r';
+      else if (ch === '\t') out += '\\t';
+      else out += `\\u${code.toString(16).padStart(4, '0')}`;
+      continue;
+    }
+
+    out += ch;
+  }
+
+  // 去掉对象/数组末尾多余的逗号
+  return out.replace(/,\s*([}\]])/g, '$1');
+}
+
 function parseLlmJson(raw) {
   if (typeof raw !== 'string' || !raw.trim()) {
-    throw new Error('模型返回内容为空');
+    const err = new Error('模型返回内容为空');
+    err.code = 'BAD_LLM_JSON';
+    throw err;
   }
   const text = raw
     .trim()
@@ -211,9 +288,23 @@ function parseLlmJson(raw) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start === -1 || end <= start) {
-    throw new Error('模型返回内容不是 JSON');
+    const err = new Error('模型返回内容不是 JSON');
+    err.code = 'BAD_LLM_JSON';
+    throw err;
   }
-  return JSON.parse(text.slice(start, end + 1));
+
+  const candidate = text.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch (firstErr) {
+    try {
+      return JSON.parse(repairJsonText(candidate));
+    } catch {
+      const err = new Error(`模型返回的 JSON 无法解析：${firstErr.message}`);
+      err.code = 'BAD_LLM_JSON';
+      throw err;
+    }
+  }
 }
 
 function normalizeFeedback(obj) {
@@ -373,8 +464,27 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
       }
     }
 
-    const raw = await callChatModel(buildEvaluatePrompt(originalContent, transcribedText));
-    const feedback = normalizeFeedback(parseLlmJson(raw));
+    const prompt = buildEvaluatePrompt(originalContent, transcribedText);
+    let feedback = null;
+    let lastJsonError = null;
+    for (let attempt = 0; attempt < 2 && !feedback; attempt += 1) {
+      const raw = await callChatModel(
+        attempt === 0
+          ? prompt
+          : `${prompt}\n\n上一次返回的内容不是合法 JSON。请重新输出，只输出一个 JSON 对象，不要代码块、不要解释，字符串内不要有换行和反斜杠。`
+      );
+      try {
+        feedback = normalizeFeedback(parseLlmJson(raw));
+      } catch (parseErr) {
+        lastJsonError = parseErr;
+        console.error(`模型返回内容解析失败（第 ${attempt + 1} 次）：`, parseErr.message);
+      }
+    }
+    if (!feedback) {
+      const err = new Error(lastJsonError?.message || '模型返回内容无法解析');
+      err.code = 'BAD_LLM_JSON';
+      throw err;
+    }
 
     let saved = null;
     if (targetKp) {
@@ -404,6 +514,9 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
     }
     if (err.code === 'NO_CREDENTIAL') {
       return res.status(503).json({ msg: err.message + '，请在 .env 中配置后重启后端' });
+    }
+    if (err.code === 'BAD_LLM_JSON') {
+      return res.status(502).json({ msg: 'AI 返回的内容格式异常，已自动重试仍未成功，请再点一次评分' });
     }
     if (err.llm) {
       // 通用 OpenAI 兼容接口在 200 里返回 error

@@ -105,7 +105,7 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 
 1. **调用链路**：`POST /api/audio/evaluate` → `callChatModel()`。配置了 `LLM_BASE_URL + LLM_API_KEY + LLM_MODEL` 时走 `POST {LLM_BASE_URL}/chat/completions`（`Authorization: Bearer`）；否则走千帆：`bce-v3` Key 用 `/v2/chat/completions`，应用接入用 access_token（独立缓存）。请求体都是 `{ model, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }`。
 2. **Prompt 设计**：单个 user 消息里同时给出「角色设定 + 原始知识点 + 学生复述 + 三项任务 + JSON 字段模板」，把 `originalContent` 与 `transcribedText` 用代码块包起来，避免内容里的符号破坏指令结构。`temperature` 压到 0.2 是为了让输出更稳定。
-3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}` 再解析；`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串。`score` 不是数字时返回 502，而不是把 0 分写进数据库。
+3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}`；解析失败时 `repairJsonText()` 逐字符修复中文模型的常见问题——字符串内未转义的真实换行、`\(` / `\[` 等非法转义、`\frac` / `\text` 这类 LaTeX 反斜杠、对象末尾多余逗号。若仍解析失败，会用「只输出 JSON、不要换行和反斜杠」的追加指令自动重试一次；两次都失败才返回 502 与中文提示。`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串，`score` 不是数字时同样返回 502，而不是把 0 分写进数据库。
 4. **结果落库**：请求带 `knowledgePointId` 时，控制器在调用模型前先校验该知识点存在且属于当前用户（避免白发一次模型请求），评价成功后把 `transcribedText / polishedText / evaluation / strengths / weaknesses / score / createdAt` 整体写入 `KnowledgePoint.lastAttempt`，并按 `score < 60` 更新 `reviewList` 与 `status`。落库失败不会吞掉评价结果，接口仍返回反馈并给出 `saved: null`。详情页直接读 `GET /api/knowledge-points/:id` 里的 `lastAttempt`，不需要再问一次模型。
 5. **权限与模型名**：语音技术的权限与大模型权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`；可用 `node scripts/check-llm.js --list` 查看当前 Key 有哪些可用。千帆账户欠费时服务端会返回 `account_overdue`，此时可改用有免费额度的 OpenAI 兼容服务（见上文的 `LLM_*`）。
 
