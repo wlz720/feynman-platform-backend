@@ -75,6 +75,8 @@ node index.js            # http://localhost:3000
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
 | POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText, knowledgePointId? }`，返回润色、评价、优缺点、分数；带 `knowledgePointId` 时写回该知识点的 `lastAttempt` 与复习状态 |
 
+知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。存储的是原始 Markdown，不做服务端 HTML 转义（转义会破坏代码块），XSS 防护由前端 `react-markdown` 与 `DOMPurify` 负责。
+
 ### 状态码约定
 
 | 状态码 | 含义 |

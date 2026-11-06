@@ -18,14 +18,18 @@ const KnowledgePointSchema = new mongoose.Schema({
   },
   title: {
     type: String,
-    required: true
+    required: true,
+    trim: true,
+    maxlength: 200
   },
   content: {
     type: String,
-    required: true
+    required: true,
+    maxlength: 100000
   },
   status: {
     type: String,
+    enum: ['not_started', 'need_review', 'mastered'],
     default: 'not_started'
   },
   reviewList: {

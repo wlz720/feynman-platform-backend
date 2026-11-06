@@ -4,13 +4,36 @@ const auth = require('../middleware/auth');
 const KnowledgePoint = require('../models/KnowledgePoint');
 const { sendDbAwareError } = require('../middleware/dbGuard');
 
+const MAX_TITLE_CHARS = 200;
+const MAX_CONTENT_CHARS = 100000;
+const STATUS_VALUES = ['not_started', 'need_review', 'mastered'];
+
+// 标题和正文都会原样存库并在前端渲染，这里只做边界校验（类型/长度），
+// HTML 与脚本的清理交给渲染层的 react-markdown + DOMPurify。
+function readTitle(value) {
+  if (typeof value !== 'string' || !value.trim()) return { error: '标题不能为空' };
+  const title = value.trim();
+  if (title.length > MAX_TITLE_CHARS) return { error: `标题不能超过 ${MAX_TITLE_CHARS} 字` };
+  return { value: title };
+}
+
+function readContent(value) {
+  if (typeof value !== 'string' || !value.trim()) return { error: '内容不能为空' };
+  if (value.length > MAX_CONTENT_CHARS) return { error: `内容不能超过 ${MAX_CONTENT_CHARS} 字` };
+  return { value };
+}
+
 // 创建知识点
 router.post('/', auth, async (req, res) => {
   try {
-    const { title, content } = req.body;
+    const title = readTitle(req.body?.title);
+    if (title.error) return res.status(400).json({ msg: title.error });
+    const content = readContent(req.body?.content);
+    if (content.error) return res.status(400).json({ msg: content.error });
+
     const newKp = new KnowledgePoint({
-      title,
-      content,
+      title: title.value,
+      content: content.value,
       user: req.user.id
     });
     const kp = await newKp.save();
@@ -57,12 +80,31 @@ router.put('/:id', auth, async (req, res) => {
       return res.status(401).json({ msg: 'Not authorized' });
     }
 
-    const { title, content, status, reviewList } = req.body;
-    kp = await KnowledgePoint.findByIdAndUpdate(
-      req.params.id,
-      { $set: { title, content, status, reviewList } },
-      { new: true }
-    );
+    const updates = {};
+    if (req.body?.title !== undefined) {
+      const title = readTitle(req.body.title);
+      if (title.error) return res.status(400).json({ msg: title.error });
+      updates.title = title.value;
+    }
+    if (req.body?.content !== undefined) {
+      const content = readContent(req.body.content);
+      if (content.error) return res.status(400).json({ msg: content.error });
+      updates.content = content.value;
+    }
+    if (req.body?.status !== undefined) {
+      if (!STATUS_VALUES.includes(req.body.status)) {
+        return res.status(400).json({ msg: 'status 取值不合法' });
+      }
+      updates.status = req.body.status;
+    }
+    if (req.body?.reviewList !== undefined) {
+      updates.reviewList = Boolean(req.body.reviewList);
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ msg: '没有需要更新的字段' });
+    }
+
+    kp = await KnowledgePoint.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
     res.json(kp);
   } catch (err) {
     sendDbAwareError(res, err, 'Server Error');
