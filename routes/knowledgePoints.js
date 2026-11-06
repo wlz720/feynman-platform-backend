@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const KnowledgePoint = require('../models/KnowledgePoint');
+const { sendDbAwareError } = require('../middleware/dbGuard');
 
 // 创建知识点
 router.post('/', auth, async (req, res) => {
@@ -15,8 +16,7 @@ router.post('/', auth, async (req, res) => {
     const kp = await newKp.save();
     res.json(kp);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    sendDbAwareError(res, err, 'Server Error');
   }
 });
 
@@ -26,8 +26,7 @@ router.get('/', auth, async (req, res) => {
     const kps = await KnowledgePoint.find({ user: req.user.id }).sort({ createdAt: -1 });
     res.json(kps);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    sendDbAwareError(res, err, 'Server Error');
   }
 });
 
@@ -43,8 +42,7 @@ router.get('/:id', auth, async (req, res) => {
     }
     res.json(kp);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    sendDbAwareError(res, err, 'Server Error');
   }
 });
 
@@ -67,8 +65,7 @@ router.put('/:id', auth, async (req, res) => {
     );
     res.json(kp);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    sendDbAwareError(res, err, 'Server Error');
   }
 });
 
@@ -85,8 +82,7 @@ router.delete('/:id', auth, async (req, res) => {
     await KnowledgePoint.findByIdAndDelete(req.params.id);
     res.json({ msg: 'Knowledge point removed' });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    sendDbAwareError(res, err, 'Server Error');
   }
 });
 

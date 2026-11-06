@@ -17,17 +17,35 @@ const port = process.env.PORT || 3000;
 
 // 音频语音识别路由
 const audioRouter = require('./routes/audio');
+const { requireDb } = require('./middleware/dbGuard');
 
 // 中间件
 app.use(cors());
 app.use(express.json());
 
-// MongoDB连接
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected successfully!'))
-  .catch(err => console.error('MongoDB connection error:', err));
+// MongoDB连接（Atlas 偶尔选节点很慢，给足超时并在首次失败时重试）
+const MONGO_OPTIONS = {
+  serverSelectionTimeoutMS: 15000,
+  socketTimeoutMS: 45000,
+};
 
-// 路由挂载
+async function connectWithRetry(attempt = 1) {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, MONGO_OPTIONS);
+    console.log('MongoDB connected successfully!');
+  } catch (err) {
+    console.error(`MongoDB connection failed (第 ${attempt} 次):`, err.message);
+    if (attempt < 5) setTimeout(() => connectWithRetry(attempt + 1), 3000);
+  }
+}
+
+mongoose.connection.on('disconnected', () => console.warn('MongoDB 连接已断开，正在自动重连…'));
+mongoose.connection.on('error', (err) => console.error('MongoDB 连接异常:', err.message));
+
+connectWithRetry();
+
+// 路由挂载（数据库未就绪时直接返回 503，而不是让请求等到超时再报 500）
+app.use('/api', requireDb);
 app.use('/api/users', require('./routes/users'));
 app.use('/api/knowledge-points', require('./routes/knowledgePoints'));
 app.use('/api/audio', audioRouter);

@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { sendDbAwareError } = require('../middleware/dbGuard');
 
 // 注册【中文提示，不再返回token】
 router.post('/register', async (req, res) => {
@@ -22,8 +23,7 @@ router.post('/register', async (req, res) => {
     await user.save();
     res.status(201).json({ msg: '用户注册成功' });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('服务器错误');
+    sendDbAwareError(res, err);
   }
 });
 
@@ -58,8 +58,7 @@ router.post('/login', async (req, res) => {
       }
     );
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('服务器错误');
+    sendDbAwareError(res, err);
   }
 });
 

@@ -20,6 +20,7 @@ routes/users.js                 注册 / 登录
 routes/knowledgePoints.js       知识点增删改查（需登录）
 routes/audio.js                 录音上传与识别（需登录）
 middleware/auth.js              校验请求头 x-auth-token
+middleware/dbGuard.js           数据库未就绪时快速返回 503，区分网络异常与业务错误
 models/User.js                  用户模型
 models/KnowledgePoint.js        知识点模型
 controllers/baiduAiController.js  token 获取与缓存、调用百度识别、错误码映射
@@ -62,6 +63,24 @@ node index.js            # http://localhost:3000
 | PUT | `/api/knowledge-points/:id` | 更新知识点 |
 | DELETE | `/api/knowledge-points/:id` | 删除知识点 |
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
+
+### 状态码约定
+
+| 状态码 | 含义 |
+| --- | --- |
+| 400 | 业务校验失败，如 `邮箱或密码错误`、`邮箱已被注册` |
+| 401 | 未携带或携带了无效的 `x-auth-token` |
+| 422 | 语音识别返回空结果 |
+| 500 | 服务端异常（非数据库连接问题） |
+| 503 | 数据库连接未就绪或查询超时 |
+
+MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒；过去这段时间查询会一直挂着，最后抛 `MongooseServerSelectionError`，被路由统一按 500 返回，前端因此只能显示「登录失败，请检查邮箱和密码」，看起来像是密码错了。现在 `middleware/dbGuard.js` 会：
+
+- 连接未就绪时直接返回 503 与明确文案，不再让请求挂到超时；
+- 首次连接失败后自动重试（最多 5 次，间隔 3 秒），并打印 `MongoDB connection failed (第 n 次)`；
+- 把网络类异常单独映射为 503，前端提示「数据库连接超时」。
+
+若仍频繁出现，优先检查本机到 Atlas 的出口网络：域名能解析不代表 TCP 27017 可达。可在 PowerShell 里执行 `Test-NetConnection <集群节点>:27017`，或在 Atlas 控制台确认 Network Access 的 IP 白名单。
 
 ## 语音识别实现要点
 
