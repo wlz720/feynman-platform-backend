@@ -4,8 +4,6 @@ const auth = require('../middleware/auth');
 const KnowledgePoint = require('../models/KnowledgePoint');
 const { sendDbAwareError } = require('../middleware/dbGuard');
 
-const REVIEW_THRESHOLD = 60;
-
 // 创建知识点
 router.post('/', auth, async (req, res) => {
   try {
@@ -65,38 +63,6 @@ router.put('/:id', auth, async (req, res) => {
       { $set: { title, content, status, reviewList } },
       { new: true }
     );
-    res.json(kp);
-  } catch (err) {
-    sendDbAwareError(res, err, 'Server Error');
-  }
-});
-
-// 记录一次 AI 评价结果：低于阈值自动进入复习列表
-router.post('/:id/evaluate-result', auth, async (req, res) => {
-  try {
-    const score = Number(req.body.score);
-    if (!Number.isFinite(score) || score < 0 || score > 100) {
-      return res.status(400).json({ msg: 'score 必须是 0 到 100 之间的数字' });
-    }
-
-    const kp = await KnowledgePoint.findById(req.params.id);
-    if (!kp) {
-      return res.status(404).json({ msg: 'Knowledge point not found' });
-    }
-    if (kp.user.toString() !== req.user.id) {
-      return res.status(401).json({ msg: 'Not authorized' });
-    }
-
-    kp.lastScore = Math.round(score);
-    kp.lastEvaluatedAt = new Date();
-    if (kp.lastScore < REVIEW_THRESHOLD) {
-      kp.status = 'need_review';
-      kp.reviewList = true;
-    } else {
-      kp.status = 'mastered';
-      kp.reviewList = false;
-    }
-    await kp.save();
     res.json(kp);
   } catch (err) {
     sendDbAwareError(res, err, 'Server Error');

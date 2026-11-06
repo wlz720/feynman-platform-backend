@@ -1,5 +1,16 @@
 const mongoose = require('mongoose');
 
+// 最近一次费曼复述的评价快照，详情页直接读这里，不再回查模型
+const AttemptSchema = new mongoose.Schema({
+  transcribedText: { type: String, default: '' },
+  polishedText: { type: String, default: '' },
+  evaluation: { type: String, default: '' },
+  strengths: { type: [String], default: [] },
+  weaknesses: { type: [String], default: [] },
+  score: { type: Number, default: null },
+  createdAt: { type: Date, default: null }
+}, { _id: false });
+
 const KnowledgePointSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.Types.ObjectId,
@@ -21,12 +32,8 @@ const KnowledgePointSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  lastScore: {
-    type: Number,
-    default: null
-  },
-  lastEvaluatedAt: {
-    type: Date,
+  lastAttempt: {
+    type: AttemptSchema,
     default: null
   }
 }, { timestamps: true });

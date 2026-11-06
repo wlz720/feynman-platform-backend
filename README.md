@@ -70,8 +70,7 @@ node index.js            # http://localhost:3000
 | PUT | `/api/knowledge-points/:id` | 更新知识点 |
 | DELETE | `/api/knowledge-points/:id` | 删除知识点 |
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
-| POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText }`，返回润色、评价、优缺点与分数 |
-| POST | `/api/knowledge-points/:id/evaluate-result` | 请求体 `{ score }`，写回得分并按阈值更新 `reviewList` / `status` |
+| POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText, knowledgePointId? }`，返回润色、评价、优缺点、分数；带 `knowledgePointId` 时写回该知识点的 `lastAttempt` 与复习状态 |
 
 ### 状态码约定
 
@@ -104,7 +103,7 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 1. **调用链路**：`POST /api/audio/evaluate` → 换取千帆 access_token（独立缓存）→ `POST {QIANFAN_CHAT_BASE}/{model}?access_token=…`，请求体 `{ messages: [{ role: 'user', content: prompt }], temperature: 0.2 }`。
 2. **Prompt 设计**：单个 user 消息里同时给出「角色设定 + 原始知识点 + 学生复述 + 三项任务 + JSON 字段模板」，把 `originalContent` 与 `transcribedText` 用代码块包起来，避免内容里的符号破坏指令结构。`temperature` 压到 0.2 是为了让输出更稳定。
 3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}` 再解析；`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串。`score` 不是数字时返回 502，而不是把 0 分写进数据库。
-4. **复习闭环**：`score < 60` 时 `POST /api/knowledge-points/:id/evaluate-result` 会把 `reviewList` 置为 `true`、`status` 置为 `need_review`，并记录 `lastScore` / `lastEvaluatedAt`；否则置为已掌握。
+4. **结果落库**：请求带 `knowledgePointId` 时，控制器在调用模型前先校验该知识点存在且属于当前用户（避免白发一次模型请求），评价成功后把 `transcribedText / polishedText / evaluation / strengths / weaknesses / score / createdAt` 整体写入 `KnowledgePoint.lastAttempt`，并按 `score < 60` 更新 `reviewList` 与 `status`。落库失败不会吞掉评价结果，接口仍返回反馈并给出 `saved: null`。详情页直接读 `GET /api/knowledge-points/:id` 里的 `lastAttempt`，不需要再问一次模型。
 5. **权限与模型名**：语音技术与千帆的权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`，可用 `node scripts/check-qianfan.js --list` 查看当前 Key 有哪些可用。
 
 ### 自检

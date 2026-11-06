@@ -1,4 +1,7 @@
 const axios = require('axios');
+const mongoose = require('mongoose');
+const KnowledgePoint = require('../models/KnowledgePoint');
+const { isDbUnavailable } = require('../middleware/dbGuard');
 
 const TOKEN_URL = 'https://aip.baidubce.com/oauth/2.0/token';
 const ASR_URL = 'https://vop.baidu.com/server_api';
@@ -287,7 +290,7 @@ async function callChatModel(prompt) {
 }
 
 exports.evaluateFeynmanAttempt = async (req, res) => {
-  const { originalContent, transcribedText } = req.body || {};
+  const { originalContent, transcribedText, knowledgePointId } = req.body || {};
 
   if (!originalContent || !transcribedText) {
     return res.status(400).json({ msg: '缺少 originalContent 或 transcribedText' });
@@ -303,12 +306,50 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
   }
 
   try {
+    // 带 knowledgePointId 时，评价结果会顺手写回该知识点（详情页据此展示上次复述）
+    let targetKp = null;
+    if (knowledgePointId) {
+      if (!mongoose.Types.ObjectId.isValid(knowledgePointId)) {
+        return res.status(400).json({ msg: 'knowledgePointId 不合法' });
+      }
+      targetKp = await KnowledgePoint.findById(knowledgePointId);
+      if (!targetKp) {
+        return res.status(404).json({ msg: '知识点不存在' });
+      }
+      if (targetKp.user?.toString() !== req.user?.id) {
+        return res.status(403).json({ msg: '无权评价该知识点' });
+      }
+    }
+
     const raw = await callChatModel(buildEvaluatePrompt(originalContent, transcribedText));
     const feedback = normalizeFeedback(parseLlmJson(raw));
-    return res.json(feedback);
+
+    let saved = null;
+    if (targetKp) {
+      try {
+        targetKp.lastAttempt = {
+          ...feedback,
+          transcribedText: transcribedText.trim(),
+          createdAt: new Date()
+        };
+        const needReview = feedback.score < REVIEW_THRESHOLD;
+        targetKp.reviewList = needReview;
+        targetKp.status = needReview ? 'need_review' : 'mastered';
+        await targetKp.save();
+        saved = { reviewList: targetKp.reviewList, status: targetKp.status };
+      } catch (saveErr) {
+        // 保存失败不影响把评价结果返回给用户
+        console.error('保存评价结果失败：', saveErr.message);
+      }
+    }
+
+    return res.json({ ...feedback, saved });
   } catch (err) {
     const detail = err.qianfan || err.detail || {};
 
+    if (isDbUnavailable(err)) {
+      return res.status(503).json({ msg: '数据库连接超时，请稍后重试' });
+    }
     if (err.code === 'NO_CREDENTIAL') {
       return res.status(503).json({ msg: err.message + '，请在 .env 中配置后重启后端' });
     }
