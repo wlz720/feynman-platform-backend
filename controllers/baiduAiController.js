@@ -170,22 +170,26 @@ async function getQianfanAccessToken() {
   return pendingQianfanToken;
 }
 
-// 润色单独走一次请求，且只给它「学生原话」——不给知识点正文，
-// 否则模型很容易照着标准答案重写，而不是润色学生说的内容。
-function buildPolishPrompt(transcribedText, originalContent) {
+// 润色单独走一次请求。为了让模型能把同音误识别的专有名词改回来
+// （如「增伤原理」→「熵增原理」），这里会带上知识点名称作术语表，
+// 但不带正文的定义和结论，避免它照着标准答案重写学生的话。
+function buildPolishPrompt(transcribedText, originalContent, kpTitle) {
+  const titleLine = kpTitle ? `【知识点名称（术语表，只用于校对用字）】：${kpTitle}\n\n` : '';
   return `你是中文语音转写校对员。请只对学生口述的文本做“语言润色”，不要回答问题、不要讲解知识。
 
-【学生口述（语音识别结果）】
+${titleLine}【学生口述（语音识别结果）】
 \`\`\`
 ${transcribedText}
 \`\`\`
 
 润色规则（严格遵守）：
 1. 只改表达，不改意思：去掉口头禅和重复词，补标点，理顺语序。
-2. 可以按读音纠正明显的识别错字（例如把同音词改成正确的专业名词），但不要改变学生原本的观点。
-3. 学生说得不完整、说错了、甚至完全没听懂，都必须原样保留这种状态，不要替他补全或纠正。
-4. 禁止引入【原始知识点】里的定义、结论或表述；禁止添加学生没说过的新信息。
-5. 润色后的长度应当和原话接近，最多略长；如果会明显变长，说明你在补充知识，请停下重写。
+2. 必须纠正专有名词的同音/近音误识别。重点检查学生口述里与${kpTitle ? '【知识点名称】' : '【原始知识点】中的术语'}读音相近但用字错误的词，改回正确写法（例如「增伤原理」「增长原理」→「熵增原理」，「拉格郎日」→「拉格朗日」）。只替换这几个字，紧挨着的其他字一律不动。
+3. 只纠用字，不纠知识。学生说错、说漏、说得不完整，甚至把概念安到错误的理论上，都要原样保留。例如学生说「增伤原理就是热力学第一定律吧」，只能改成「熵增原理就是热力学第一定律吧」，「第一定律」不许改成「第二定律」，哪怕它在事实上是错的。
+4. 其他明显的同音错字（如「因该」→「应该」）也可以改，但拿不准时保留原样。
+5. 不要改写成定义句。不要新增「即……」「是指……」这类学生原话里没有的解释性结构，也不要补全主语、宾语或结论。
+6. 禁止引入【原始知识点】里的定义、结论或表述；禁止添加学生没说过的新信息。术语替换不算添加信息，但不能因为换了术语就顺手把知识点里的解释也写进来。
+7. 润色后的长度应当和原话接近，最多略长；如果会明显变长，说明你在补充知识，请停下重写。
 
 【原始知识点（仅供判断专业名词用，禁止照抄）】
 \`\`\`
@@ -524,7 +528,7 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
     // 润色与评价各走一次请求、并行执行：润色只看学生原话，评价才带知识点，
     // 这样模型不会把「润色」做成「照着标准答案重写」。
     const [polishedRaw, evalObj] = await Promise.all([
-      callChatModel(buildPolishPrompt(transcribedText, originalContent)).catch((polishErr) => {
+      callChatModel(buildPolishPrompt(transcribedText, originalContent, targetKp?.title)).catch((polishErr) => {
         console.error('润色请求失败，回退使用原文本：', polishErr.message);
         return '';
       }),
