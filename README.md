@@ -79,6 +79,7 @@ node index.js            # http://localhost:3000
 | POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText, knowledgePointId? }`，返回润色、评价、优缺点、分数；带 `knowledgePointId` 时写回该知识点的 `lastAttempt` 与复习状态 |
 | POST | `/api/ai/generate-question` | 请求体 `{ knowledgePointContent, difficulty, type? }`，`difficulty` 为 `基础 / 中等 / 困难`，`type` 为 `single-choice`（默认）或 `short-answer`，返回结构化题目 |
 | POST | `/api/ai/grade-answer` | 请求体 `{ question, answerKeyPoints, studentAnswer }`，返回 `{ isCorrect, explanation, studentAnswer }` |
+| POST | `/api/ai/rag-qa` | 课时11。请求体 `{ question }`（≤500 字），基于当前用户向量库检索后由大模型作答，返回 `{ answer, sources }`，`sources` 为引用的知识点（含相似度与摘要） |
 
 知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。写入前还会经过 `utils/sanitizeMarkdown.js` 做存储侧消毒：删除代码块之外的原始 HTML（`<script>`、`<iframe>`、带 `onerror` 的标签等），因此恶意载荷不会进入数据库；围栏代码块、行内代码、自动链接、引用块和 LaTeX 公式保持原样，避免把教学示例也一并删掉。渲染时前端还会用 `react-markdown` + `DOMPurify` 再消毒一次，形成「入库 + 渲染」两层防护。
 
@@ -143,6 +144,15 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 4. **存储（Store）**：向量库是 `vector_store/store.json`（已 gitignore），每块记录 `userId / knowledgePointId / title / text / embedding`。写入串行化 + 临时文件改名，避免并发覆盖或写坏文件。
 5. **自动索引**：`POST /api/knowledge-points` 保存成功后异步调用 `addKnowledgePointToStore()`，不阻塞响应；`PUT` 只在正文变化时重建索引（先删旧块再加新块，比课件 HNSWLib「允许冗余」更干净）；`DELETE` 同步清理向量。索引失败只记日志，不影响知识点保存。
 6. **多用户隔离**：检索时按 `userId` 过滤，用户只能问到自己知识库的内容。
+
+### 课时11：检索与生成（RAG 问答闭环）
+
+`POST /api/ai/rag-qa`（`controllers/baiduAiController.js` 的 `answerWithRAG`）把「检索 → 增强 → 生成」串成完整链路：
+
+1. **检索**：`queryVectorStore()` 把问题用同一个 Embedding 模型向量化，在当前用户的向量库里做余弦相似度搜索，取 Top-4；相似度低于 0.35 的块视为不相关直接丢弃。
+2. **MCP 结构化 Prompt**：按课件的「大模型上下文协议」用 `<role>` / `<instruction>` / `<context>` / `<question>` 标签划分角色，明确要求「资料里没有就直说不知道，不要编造」。课件的 LCEL `RunnableSequence` 在这里等价实现为「检索 → 拼 Prompt → `callChatModel()`」，从而复用项目已有的多通道路由（智谱 / 千帆 v2 / 千帆 v1）与中文错误提示。
+3. **防幻觉双保险**：知识库为空或全部不相关时直接返回「知识库中暂无相关内容」，不发起模型调用；相关时模型也被指令约束只依据资料作答。
+4. **引用来源（课件选做优化）**：响应带 `sources` 数组（知识点 id、标题、相似度、片段摘要），前端在回答下方渲染成可点击的 chips，跳转到对应知识点详情页，增加回答可信度。
 
 ### 自检
 

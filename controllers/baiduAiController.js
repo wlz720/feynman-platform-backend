@@ -926,3 +926,75 @@ exports.gradeAnswer = async (req, res) => {
     return sendLlmError(res, err, '阅卷', '提交答案');
   }
 };
+
+// ==================== 第十一课：RAG 检索增强问答 ====================
+
+const { queryVectorStore } = require('../services/vectorStoreService');
+
+const MAX_QUESTION_INPUT_CHARS = 500;
+const RAG_TOP_K = 4;
+// 相似度低于该阈值的文本块视为不相关，不送给模型（防止拿无关内容硬答）
+const RAG_MIN_SCORE = 0.35;
+
+// 遵循课件「大模型上下文协议（MCP）」的结构化 Prompt：
+// 用类 XML 标签明确各部分角色（背景资料 / 用户问题），减少歧义、抑制幻觉。
+// 与课件的 PromptTemplate 等价，这里用函数拼接以便复用 callChatModel 的多通道路由。
+function buildRagPrompt(context, question) {
+  return `<role>你是「费曼学习平台」的私有知识库问答机器人。</role>
+<instruction>请只根据下面<context>中提供的资料回答用户的<question>。要求：
+1. 如果<context>中没有与问题相关的信息，就明确回答「知识库中暂无相关内容」，不要编造答案。
+2. 回答简洁明了，用中文，可以使用 Markdown 排版。
+3. 不要提及「上下文」「资料」等内部机制，像老师答疑一样自然作答。</instruction>
+
+<context>
+${context}
+</context>
+
+<question>
+${question}
+</question>`;
+}
+
+function formatRagDocs(docs) {
+  return docs
+    .map((doc, i) => `--- 文档 ${i + 1}（来自知识点《${doc.metadata.title}》） ---\n${doc.pageContent}`)
+    .join('\n\n');
+}
+
+exports.answerWithRAG = async (req, res) => {
+  const question = typeof req.body?.question === 'string' ? req.body.question.trim() : '';
+  if (!question) return res.status(400).json({ msg: '请输入问题' });
+  if (question.length > MAX_QUESTION_INPUT_CHARS) {
+    return res.status(400).json({ msg: `问题过长，请控制在 ${MAX_QUESTION_INPUT_CHARS} 字以内` });
+  }
+
+  try {
+    // 1. 检索：问题向量化 → 在当前用户的向量库里找最相关的文本块
+    const relevantDocs = await queryVectorStore(question, { userId: req.user.id, k: RAG_TOP_K });
+    const usefulDocs = relevantDocs.filter((doc) => doc.score >= RAG_MIN_SCORE);
+
+    // 2. 知识库为空或全都不相关时直接回答，不浪费一次模型调用
+    if (!usefulDocs.length) {
+      return res.json({
+        answer: '知识库中暂无与该问题相关的内容。可以先创建相关知识点，或换个与已有知识点相关的问法。',
+        sources: []
+      });
+    }
+
+    // 3. 生成：把检索到的文本块和问题一起交给大模型（RAG 链的 LCEL 等价实现）
+    const answer = await callChatModel(buildRagPrompt(formatRagDocs(usefulDocs), question));
+
+    // 选做优化：返回引用来源，前端展示回答依据了哪些知识点，增加可信度
+    const sourceMap = new Map();
+    usefulDocs.forEach((doc) => {
+      const id = doc.metadata.knowledgePointId;
+      if (!sourceMap.has(id)) {
+        sourceMap.set(id, { knowledgePointId: id, title: doc.metadata.title, score: doc.score, excerpt: doc.pageContent.slice(0, 120) });
+      }
+    });
+
+    return res.json({ answer: String(answer || '').trim(), sources: [...sourceMap.values()] });
+  } catch (err) {
+    return sendLlmError(res, err, '问答', '提问');
+  }
+};
