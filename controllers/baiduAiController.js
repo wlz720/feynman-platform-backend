@@ -493,6 +493,62 @@ async function requestEvaluationJson(prompt) {
   throw err;
 }
 
+// 各 AI 接口的异常映射集中在这里，避免出题/评分/评价三处各写一份
+function sendLlmError(res, err, label, retryLabel) {
+  const detail = err.qianfan || err.detail || {};
+
+  if (isDbUnavailable(err)) {
+    return res.status(503).json({ msg: '数据库连接超时，请稍后重试' });
+  }
+  if (err.code === 'NO_CREDENTIAL') {
+    return res.status(503).json({ msg: err.message + '，请在 .env 中配置后重启后端' });
+  }
+  if (err.code === 'BAD_LLM_JSON') {
+    return res.status(502).json({
+      msg: `AI 返回的内容格式异常，已自动重试仍未成功，请再点一次${retryLabel || label}`
+    });
+  }
+  if (err.llm) {
+    // 通用 OpenAI 兼容接口在 200 里返回 error
+    console.error('模型接口返回错误：', err.llm);
+    return res.status(502).json({
+      msg: LLM_ERROR_HINTS[err.llm.code] || `模型接口返回错误：${err.llm.message || err.llm.code}`,
+      error: { error_code: err.llm.code, error_msg: err.llm.message }
+    });
+  }
+  if (err.code === 'ERR_BAD_RESPONSE' || err.response?.status) {
+    const status = err.response?.status;
+    const body = err.response?.data || {};
+    // 千帆 v1 用 error_code/error_msg，v2 与 OpenAI 兼容接口用 error.code/error.message
+    const upstreamCode = body.error_code || body.error?.code;
+    const upstreamMsg = body.error_msg || body.error?.message;
+    console.error('模型接口异常：', status, body);
+    return res.status(502).json({
+      msg:
+        LLM_ERROR_HINTS[upstreamCode] ||
+        `调用大模型失败（HTTP ${status}）${upstreamMsg ? '：' + upstreamMsg : ''}`,
+      error: { error_code: upstreamCode, error_msg: upstreamMsg }
+    });
+  }
+  if (detail.error_code) {
+    console.error('千帆返回错误：', detail.error_code, detail.error_msg);
+    return res.status(502).json({
+      msg: LLM_ERROR_HINTS[detail.error_code] || `千帆返回错误：${detail.error_msg || detail.error_code}`,
+      error: { error_code: detail.error_code, error_msg: detail.error_msg }
+    });
+  }
+  if (detail.error) {
+    console.error('千帆鉴权失败：', detail.error, detail.error_description);
+    return res.status(503).json({
+      msg: `千帆鉴权失败（${detail.error}），请检查 QIANFAN_API_KEY / QIANFAN_SECRET_KEY`,
+      error: { error: detail.error, error_description: detail.error_description }
+    });
+  }
+
+  console.error(`AI ${label}失败：`, err.message);
+  return res.status(502).json({ msg: `AI ${label}失败：${err.message}` });
+}
+
 exports.evaluateFeynmanAttempt = async (req, res) => {
   const { originalContent, transcribedText, knowledgePointId } = req.body || {};
 
@@ -558,55 +614,315 @@ exports.evaluateFeynmanAttempt = async (req, res) => {
 
     return res.json({ ...feedback, saved });
   } catch (err) {
-    const detail = err.qianfan || err.detail || {};
+    return sendLlmError(res, err, '评价', '评分');
+  }
+};
 
-    if (isDbUnavailable(err)) {
-      return res.status(503).json({ msg: '数据库连接超时，请稍后重试' });
-    }
-    if (err.code === 'NO_CREDENTIAL') {
-      return res.status(503).json({ msg: err.message + '，请在 .env 中配置后重启后端' });
-    }
-    if (err.code === 'BAD_LLM_JSON') {
-      return res.status(502).json({ msg: 'AI 返回的内容格式异常，已自动重试仍未成功，请再点一次评分' });
-    }
-    if (err.llm) {
-      // 通用 OpenAI 兼容接口在 200 里返回 error
-      console.error('模型接口返回错误：', err.llm);
-      return res.status(502).json({
-        msg: LLM_ERROR_HINTS[err.llm.code] || `模型接口返回错误：${err.llm.message || err.llm.code}`,
-        error: { error_code: err.llm.code, error_msg: err.llm.message }
-      });
-    }
-    if (err.code === 'ERR_BAD_RESPONSE' || err.response?.status) {
-      const status = err.response?.status;
-      const body = err.response?.data || {};
-      // 千帆 v1 用 error_code/error_msg，v2 与 OpenAI 兼容接口用 error.code/error.message
-      const upstreamCode = body.error_code || body.error?.code;
-      const upstreamMsg = body.error_msg || body.error?.message;
-      console.error('模型接口异常：', status, body);
-      return res.status(502).json({
-        msg:
-          LLM_ERROR_HINTS[upstreamCode] ||
-          `调用大模型失败（HTTP ${status}）${upstreamMsg ? '：' + upstreamMsg : ''}`,
-        error: { error_code: upstreamCode, error_msg: upstreamMsg }
-      });
-    }
-    if (detail.error_code) {
-      console.error('千帆返回错误：', detail.error_code, detail.error_msg);
-      return res.status(502).json({
-        msg: LLM_ERROR_HINTS[detail.error_code] || `千帆返回错误：${detail.error_msg || detail.error_code}`,
-        error: { error_code: detail.error_code, error_msg: detail.error_msg }
-      });
-    }
-    if (detail.error) {
-      console.error('千帆鉴权失败：', detail.error, detail.error_description);
-      return res.status(503).json({
-        msg: `千帆鉴权失败（${detail.error}），请检查 QIANFAN_API_KEY / QIANFAN_SECRET_KEY`,
-        error: { error: detail.error, error_description: detail.error_description }
-      });
-    }
+// ==================== 第九课：AI 出题 + 智能阅卷 ====================
 
-    console.error('AI 评价失败：', err.message);
-    return res.status(502).json({ msg: `AI 评价失败：${err.message}` });
+const QUIZ_DIFFICULTIES = ['基础', '中等', '困难'];
+const QUIZ_TYPES = ['single-choice', 'short-answer'];
+const MAX_QUESTION_CHARS = 2000;
+const MAX_ANSWER_CHARS = 5000;
+
+function buildQuestionPrompt(content, difficulty, type) {
+  const isChoice = type === 'single-choice';
+  const schema = isChoice
+    ? `{
+  "type": "single-choice",
+  "difficulty": "${difficulty}",
+  "question": "这里是题干",
+  "options": {
+    "A": "选项A的内容",
+    "B": "选项B的内容",
+    "C": "选项C的内容",
+    "D": "选项D的内容"
+  },
+  "answer": "C",
+  "explanation": "这里是对正确答案的简短解释"
+}`
+    : `{
+  "type": "short-answer",
+  "difficulty": "${difficulty}",
+  "question": "这里是题干",
+  "answer_key_points": ["答案要点1", "答案要点2", "答案要点3"],
+  "explanation": "这里是对参考答案的简短解释"
+}`;
+
+  return `你是一个专业的计算机科学出题专家。请根据【知识点内容】和【指定难度】生成一道${isChoice ? '单项选择' : '简答'}题。
+
+【知识点内容】:
+"""
+${content}
+"""
+
+【指定难度】: ${difficulty}（基础=概念记忆，中等=理解与应用，困难=分析或综合）
+
+出题要求：
+1. 题目必须能直接用【知识点内容】回答，不要引入该知识点之外的知识。
+2. ${isChoice ? '给出 A/B/C/D 四个互不相同的选项，有且只有一个正确，干扰项要合理。' : '题干要求用自己的话阐述，答案要点 3-5 条，覆盖得分点。'}
+3. 题干简洁清晰，不要照抄知识点里的整段原文。
+4. 难度必须符合【指定难度】。
+
+请严格按照以下 JSON 格式返回题目，不要包含任何额外的解释或文字，确保所有字段都存在。
+${schema}
+
+只输出 JSON。`;
+}
+
+function normalizeQuestion(obj, difficulty, type) {
+  const fail = (msg) => {
+    const err = new Error(msg);
+    err.code = 'BAD_LLM_JSON';
+    throw err;
+  };
+  const question = String(obj?.question || '').trim();
+  if (!question) fail('题目缺少题干');
+
+  if (type === 'single-choice') {
+    const rawOptions = obj.options && typeof obj.options === 'object' ? obj.options : {};
+    const options = {};
+    ['A', 'B', 'C', 'D'].forEach((key) => {
+      const value = rawOptions[key];
+      if (typeof value === 'string' && value.trim()) options[key] = value.trim();
+    });
+    if (Object.keys(options).length < 4) fail('选择题选项不足 A/B/C/D');
+
+    const answer = String(obj.answer || '').trim().toUpperCase().charAt(0);
+    if (!options[answer]) fail('选择题答案不是 A/B/C/D 之一');
+
+    return {
+      type,
+      difficulty,
+      question,
+      options,
+      answer,
+      explanation: String(obj.explanation || '').trim()
+    };
+  }
+
+  const rawPoints = Array.isArray(obj.answer_key_points) ? obj.answer_key_points : obj.answerKeyPoints;
+  const answerKeyPoints = (Array.isArray(rawPoints) ? rawPoints : [])
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+  if (!answerKeyPoints.length) fail('简答题缺少答案要点');
+
+  return {
+    type,
+    difficulty,
+    question,
+    answerKeyPoints,
+    explanation: String(obj.explanation || '').trim()
+  };
+}
+
+exports.generateQuestion = async (req, res) => {
+  const body = req.body || {};
+  const content = typeof body.knowledgePointContent === 'string' ? body.knowledgePointContent.trim() : '';
+  const difficulty = body.difficulty;
+  const type = body.type || 'single-choice';
+
+  if (!content) return res.status(400).json({ msg: '缺少知识点内容，无法出题' });
+  if (content.length > MAX_INPUT_CHARS) {
+    return res.status(400).json({ msg: `知识点内容过长，请控制在 ${MAX_INPUT_CHARS} 字以内` });
+  }
+  if (!QUIZ_DIFFICULTIES.includes(difficulty)) {
+    return res.status(400).json({ msg: '难度只能是：基础、中等、困难' });
+  }
+  if (!QUIZ_TYPES.includes(type)) {
+    return res.status(400).json({ msg: '题型只能是：single-choice、short-answer' });
+  }
+
+  try {
+    const raw = await requestEvaluationJson(buildQuestionPrompt(content, difficulty, type));
+    return res.json(normalizeQuestion(raw, difficulty, type));
+  } catch (err) {
+    return sendLlmError(res, err, '出题', '生成题目');
+  }
+};
+
+
+
+// 免费小模型对「等价术语」的指令执行不稳定，会机械地判「先进后出」与「后进先出」矛盾。
+// 送模型前先把这类同义写法统一，只做语义等价替换；含义相反的词（先进先出）不受影响。
+const TERM_EQUIVALENTS = [
+  [/先进后出/g, '后进先出'],
+  [/\bLIFO\b/gi, '后进先出'],
+  [/\bFIFO\b/gi, '先进先出'],
+  [/\bset\s*函数\b/gi, '更新函数'],
+  [/\bsetter\b/gi, '更新函数'],
+  [/状态变量/g, '状态值']
+];
+
+function normalizeEquivalentTerms(text) {
+  return TERM_EQUIVALENTS.reduce(
+    (out, [pattern, replacement]) => out.replace(pattern, replacement),
+    String(text || '')
+  );
+}
+
+function buildGradePrompt(question, answerKeyPoints, studentAnswer, knowledgePoint = {}) {
+  const kpBlock = knowledgePoint.content
+    ? `【知识点标题】: ${knowledgePoint.title || '（未提供）'}
+
+【知识点内容】:
+"""
+${knowledgePoint.content}
+"""
+
+`
+    : '';
+
+  return `你是一个客观、懂学科知识的计算机科学阅卷老师。请依据学生的学习资料判断回答，而不是只比对措辞。
+
+【最重要的规则】中文技术术语常有多种等价说法，必须先统一术语，再判断对错：
+- 「先进后出」=「后进先出」= LIFO，三者完全等价，绝不能说它们矛盾；
+- 「先进先出」= FIFO，这是另一个特性，与上面含义相反；
+- 注意只差一个字：「先进后出」≠「先进先出」。学生说「先进先出」就是错的，不能套用等价规则；
+- 「状态值」=「状态变量」，「更新函数」=「setter」=「set 函数」。
+等价替换只适用于真正同义的词，不能把含义相反的词也说成等价。
+
+${kpBlock}【题目】:
+"""
+${question}
+"""
+
+【答案要点（由另一个模型生成，仅供参考，可能不完整）】:
+${answerKeyPoints.map((point, index) => `${index + 1}. ${point}`).join('\n')}
+
+【学生的回答】:
+"""
+${studentAnswer}
+"""
+
+请按以下两步作答，不要跳步：
+第一步：把【学生的回答】里真正同义的表述替换成标准术语，得到 normalizedAnswer。只改用词，不改结论，不补全知识；「先进先出」与「后进先出」含义相反，绝不能改写成彼此。
+第二步：以 normalizedAnswer 和【知识点内容】为依据完成评判。
+
+评判要求：
+1. 以【知识点内容】为主要依据，答案要点只作辅助。知识点里写到、但要点没列出的内容同样算符合。
+2. 归一化后「栈是先进后出」会变成「栈是后进先出」，必须判为与知识点一致；但如果学生原本说的是「先进先出」，归一化后仍是「先进先出」，必须判错。
+3. 只有【知识点内容】里确实出现或可由其直接推出的内容，才能写入 matchedPoints，并说清楚哪句话符合哪个知识点；知识点没写的内容即使正确也不能放这里。学生用口语重述知识点里已有的内容（例如「栈顶随时能取到最上面那个元素」对应「取栈顶元素 peek」）应归入 matchedPoints，不要因为措辞不同就放进 beyondPoints。
+4. beyondPoints 只放「学生额外说出的、正确的、与知识点相关的知识」。像「作用我不太了解」「我忘了」这类自我说明不是拓展，也不属于符合知识点，必须写入 issues。
+5. 与知识点矛盾、明显错误，或题目要求的关键点缺失，写入 issues；没有则返回空数组。
+6. 像老师阅卷一样打 0-100 的分数 score：先按答案要点分配大致权重；答到且与知识点一致就得分，说反或与知识点矛盾要扣分，没提到不得分；beyondPoints 是正确拓展，不加分也不扣分；表达是否口语化不影响分数。
+7. 分数档位：完全正确且覆盖全部要点 85-100；覆盖主要要点 70-84；只覆盖部分要点 60-69；只有零散正确信息或存在明显矛盾 1-59；完全错误或空泛 0。分数取整数，不要给 59.5 这种小数。
+8. 如果把知识点里的核心特性说成相反的说法（例如知识点是「后进先出」，学生说成「先进先出」或 FIFO），该要点不给分，且整题总分不得高于 30。
+9. 不要臆造知识点里没有的结论；拿不准时，以 normalizedAnswer 与知识点的字面含义是否冲突为准。
+10. 各数组最多 4 条、每条一句话，要具体到内容，不要写「回答较好」这类空话。
+11. explanation 用中文总结得分理由，指出符合与需要修正之处，不超过 100 字。
+
+请严格按照以下 JSON 格式返回，不要包含任何额外的解释或文字。字符串内不要有换行和反斜杠。
+{
+  "score": 82,
+  "normalizedAnswer": "统一术语后的学生回答",
+  "matchedPoints": ["符合知识点的具体内容"],
+  "beyondPoints": ["回答正确但知识点未涵盖、且与知识点相关的内容"],
+  "issues": ["与知识点矛盾、错误或缺失的关键点"],
+  "explanation": "这里是打分理由"
+}
+
+只输出 JSON。`;
+}
+
+// 小模型偶尔忽略「先进先出 ≠ 后进先出」，这里做一次确定性反义检测：
+// 知识点讲后进先出、学生却说先进先出（且不是「不是先进先出」这类否定句）时强制降分。
+const REVERSED_TERM = /先进先出|FIFO/i;
+function detectReversedTerm(answerText, kpContent) {
+  if (!/后进先出|LIFO/i.test(kpContent)) return false;
+  return String(answerText)
+    .split(/[。；;！!？?\n，,]/)
+    .some((clause) => REVERSED_TERM.test(clause) && !/(不是|并非|而非|而不是|不等于)/.test(clause));
+}
+
+function normalizeGrade(obj, studentAnswer = '') {
+  // 新契约只让模型给分数，及格线以下统一判错，避免「分数 40 却说回答正确」的自相矛盾
+  const rawScore =
+    typeof obj?.score === 'number' ? obj.score : Number(String(obj?.score ?? '').replace(/[^\d.-]/g, ''));
+  if (!Number.isFinite(rawScore)) {
+    const err = new Error('阅卷结果缺少 score');
+    err.code = 'BAD_LLM_JSON';
+    throw err;
+  }
+  const score = Math.max(0, Math.min(100, Math.round(rawScore)));
+  const isCorrect = score >= 60;
+  const toList = (value) =>
+    (Array.isArray(value) ? value : [])
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .slice(0, 4);
+
+  // 小模型有时把「作用我不太了解」这类自我说明当成拓展知识，这里统一归到 issues
+  const SELF_ADMISSION =
+    /(不太了解|不是很了解|了解不多|不了解|不知道|不清楚|不太懂|不懂|没学过|没接触过|忘了|忘记了|记不清|不记得|没掌握|不会)/;
+  const matchedPoints = toList(obj.matchedPoints);
+  const beyondPoints = [];
+  const issues = toList(obj.issues);
+  for (const item of toList(obj.beyondPoints)) {
+    if (SELF_ADMISSION.test(item)) issues.push(`未掌握：${item}`);
+    else beyondPoints.push(item);
+  }
+  if (!issues.some((item) => SELF_ADMISSION.test(item))) {
+    const admission = String(studentAnswer)
+      .split(/[。；;！!？?\n]/)
+      .map((item) => item.trim())
+      .find((item) => item && SELF_ADMISSION.test(item));
+    if (admission) issues.push(`未掌握：${admission.slice(0, 100)}`);
+  }
+
+  return {
+    score,
+    isCorrect,
+    matchedPoints,
+    beyondPoints,
+    issues: issues.slice(0, 4),
+    explanation: String(obj.explanation || '').trim()
+  };
+}
+
+exports.gradeAnswer = async (req, res) => {
+  const body = req.body || {};
+  const question = typeof body.question === 'string' ? body.question.trim() : '';
+  const studentAnswer = typeof body.studentAnswer === 'string' ? body.studentAnswer.trim() : '';
+  const kpTitle = typeof body.knowledgePointTitle === 'string' ? body.knowledgePointTitle.trim().slice(0, 200) : '';
+  const kpContent = typeof body.knowledgePointContent === 'string' ? body.knowledgePointContent.trim() : '';
+  const rawPoints = Array.isArray(body.answerKeyPoints)
+    ? body.answerKeyPoints
+    : typeof body.answerKeyPoints === 'string'
+      ? body.answerKeyPoints.split(/\r?\n/)
+      : [];
+  const answerKeyPoints = rawPoints.map((item) => String(item).trim()).filter(Boolean);
+
+  if (!question) return res.status(400).json({ msg: '缺少题目，无法阅卷' });
+  if (!answerKeyPoints.length) return res.status(400).json({ msg: '缺少答案要点，无法阅卷' });
+  if (!studentAnswer) return res.status(400).json({ msg: '请先填写你的回答' });
+  if (question.length > MAX_QUESTION_CHARS || studentAnswer.length > MAX_ANSWER_CHARS) {
+    return res.status(400).json({ msg: '题目或回答过长，请精简后重试' });
+  }
+  if (kpContent.length > MAX_INPUT_CHARS) {
+    return res.status(400).json({ msg: `知识点内容过长，请控制在 ${MAX_INPUT_CHARS} 字以内` });
+  }
+
+  try {
+    const normalizedAnswer = normalizeEquivalentTerms(studentAnswer);
+    const normalizedKp = normalizeEquivalentTerms(kpContent);
+    const raw = await requestEvaluationJson(
+      buildGradePrompt(question, answerKeyPoints.map(normalizeEquivalentTerms), normalizedAnswer, {
+        title: kpTitle,
+        content: normalizedKp
+      })
+    );
+    const grade = normalizeGrade(raw, studentAnswer);
+    if (detectReversedTerm(normalizedAnswer, normalizedKp)) {
+      grade.score = Math.min(grade.score, 30);
+      grade.isCorrect = false;
+      grade.issues = [
+        '核心特性说反了：知识点是后进先出（LIFO），你的回答是先进先出（FIFO）',
+        ...grade.issues
+      ].slice(0, 4);
+    }
+    return res.json({ ...grade, studentAnswer });
+  } catch (err) {
+    return sendLlmError(res, err, '阅卷', '提交答案');
   }
 };

@@ -74,6 +74,8 @@ node index.js            # http://localhost:3000
 | DELETE | `/api/knowledge-points/:id` | 删除知识点 |
 | POST | `/api/audio/transcribe` | 上传音频（字段名 `audio`，≤2MB），返回识别文本 `{ result }` |
 | POST | `/api/audio/evaluate` | 请求体 `{ originalContent, transcribedText, knowledgePointId? }`，返回润色、评价、优缺点、分数；带 `knowledgePointId` 时写回该知识点的 `lastAttempt` 与复习状态 |
+| POST | `/api/ai/generate-question` | 请求体 `{ knowledgePointContent, difficulty, type? }`，`difficulty` 为 `基础 / 中等 / 困难`，`type` 为 `single-choice`（默认）或 `short-answer`，返回结构化题目 |
+| POST | `/api/ai/grade-answer` | 请求体 `{ question, answerKeyPoints, studentAnswer }`，返回 `{ isCorrect, explanation, studentAnswer }` |
 
 知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。写入前还会经过 `utils/sanitizeMarkdown.js` 做存储侧消毒：删除代码块之外的原始 HTML（`<script>`、`<iframe>`、带 `onerror` 的标签等），因此恶意载荷不会进入数据库；围栏代码块、行内代码、自动链接、引用块和 LaTeX 公式保持原样，避免把教学示例也一并删掉。渲染时前端还会用 `react-markdown` + `DOMPurify` 再消毒一次，形成「入库 + 渲染」两层防护。
 
@@ -110,6 +112,23 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 3. **JSON 容错**：模型常把结果包进 json 代码块或前后加一句解释，`parseLlmJson()` 会去掉代码围栏、截取第一个 `{` 到最后一个 `}`；解析失败时 `repairJsonText()` 逐字符修复中文模型的常见问题——字符串内未转义的真实换行、`\(` / `\[` 等非法转义、`\frac` / `\text` 这类 LaTeX 反斜杠、对象末尾多余逗号。若仍解析失败，会用「只输出 JSON、不要换行和反斜杠」的追加指令自动重试一次；两次都失败才返回 502 与中文提示。`normalizeFeedback()` 再把 `score` 夹到 0-100 取整、把数组项统一成字符串，`score` 不是数字时同样返回 502，而不是把 0 分写进数据库。
 4. **结果落库**：请求带 `knowledgePointId` 时，控制器在调用模型前先校验该知识点存在且属于当前用户（避免白发一次模型请求），评价成功后把 `transcribedText / polishedText / evaluation / strengths / weaknesses / score / createdAt` 整体写入 `KnowledgePoint.lastAttempt`，并按 `score < 60` 更新 `reviewList` 与 `status`。落库失败不会吞掉评价结果，接口仍返回反馈并给出 `saved: null`。详情页直接读 `GET /api/knowledge-points/:id` 里的 `lastAttempt`，不需要再问一次模型。
 5. **权限与模型名**：语音技术的权限与大模型权限互相独立。用语音应用凭证调用文心会返回 `error_code: 6 No permission to access data`，需在千帆控制台给应用勾选模型。新版控制台的 `bce-v3` Key 走 `/v2/chat/completions`，模型名与旧版不同（如 `ernie-5.1`、`deepseek-v4-flash-0731`），写错会返回 `invalid_model`；可用 `node scripts/check-llm.js --list` 查看当前 Key 有哪些可用。千帆账户欠费时服务端会返回 `account_overdue`，此时可改用有免费额度的 OpenAI 兼容服务（见上文的 `LLM_*`）。
+
+## AI 出题与智能阅卷实现要点
+
+1. **结构化出题**：`buildQuestionPrompt()` 按题型给两套 JSON 模板。单选题输出 `type / difficulty / question / options(A-D) / answer / explanation`；简答题输出 `answer_key_points`（3-5 条得分点），不要求模型给「标准答案」，避免措辞不同就被判错。`normalizeQuestion()` 会校验题干非空、四个选项齐全且互不相同、答案必须是选项之一，不合格按 `BAD_LLM_JSON` 处理并自动重试一次。
+2. **结构化阅卷**：`buildGradePrompt()` 把知识点标题/正文、题目、答案要点、学生回答分别放进独立代码块，要求模型分两步走——先做术语归一化，再按知识点评判，并输出 `{ score, normalizedAnswer, matchedPoints, beyondPoints, issues, explanation }`。这样结果区能分开显示「符合知识点」「正确但知识点未涵盖（不算错）」「需要修正或补充」。`normalizeGrade()` 兼容布尔值和字符串形式的 `true/false`，缺失判分字段时返回 502，而不是默认判错；同时把被误放进 `beyondPoints` 的自我说明（如「作用我不太了解」）改归到 `issues`。
+3. **等价术语双保险**：免费小模型执行「先进后出 = 后进先出」这类指令不稳定，因此在送模型前先用 `normalizeEquivalentTerms()` 做确定性替换（先进后出/LIFO → 后进先出，FIFO → 先进先出，setter → 更新函数等），只替换真正同义的词；含义相反的「先进先出」保持原样。
+4. **像老师一样打分**：简答题返回 0-100 的整数 `score`，60 分及格，`isCorrect` 由分数换算（避免「40 分却判正确」）。`detectReversedTerm()` 再兜底：知识点讲后进先出、学生却说「先进先出/FIFO」（且不是「不是先进先出」这类否定句）时，强制把分数压到 30 以下并判错，同时在 `issues` 里写明概念说反了。
+5. **复用与容错**：出题、阅卷与评价共用 `requestEvaluationJson()`、`sendLlmError()`，因此同样具备去代码围栏、修控制字符/LaTeX 反斜杠、失败重试一次，以及免费模型 429/1305、欠费、Key 无效等中文错误提示。
+6. **出题阅卷不写库**：`/api/ai` 下的出题与阅卷是纯模型调用，不经过 `requireDb`；答错后由前端调用 `PUT /api/knowledge-points/:id` 写 `reviewList: true` 与 `status: 'need_review'`，保持职责单一。
+
+## 测评记录接口
+
+作答记录单独存 `QuizAttempt` 集合（`user / knowledgePoint / type / difficulty / question / studentAnswer / isCorrect / score / feedback`），通过 `/api/quiz` 提供读写：
+
+- `POST /api/quiz/attempts`：校验知识点归属后写入一条记录。单选题不信任前端传入的对错，由服务端比较 `studentAnswer` 与 `correctAnswer` 重新判定；简答题保存 `score` 与阅卷返回的 `matchedPoints / beyondPoints / issues / explanation`，并按 `score >= 60` 重新换算 `isCorrect`。题目与作答长度分别限制 2000 / 5000 字，数组最多 8 条。
+- `GET /api/quiz/attempts?knowledgePointId=...&limit=50&onlyWrong=true`：按时间倒序返回 `{ attempts, total, wrongCount }`，`onlyWrong=true` 时只返回答错的记录，供复习页筛选。
+- 复合索引 `{ user, knowledgePoint, createdAt: -1 }` 保证按知识点翻记录时不用全表扫描。
 
 ### 自检
 

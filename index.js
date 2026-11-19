@@ -46,10 +46,12 @@ mongoose.connection.on('error', (err) => console.error('MongoDB 连接异常:', 
 connectWithRetry();
 
 // 路由挂载（数据库未就绪时直接返回 503，而不是让请求等到超时再报 500）
-// 语音转录与 AI 评价本身不读写数据库，所以不挂数据库守卫
+// 语音转录、AI 评价与出题阅卷本身不读写数据库，所以不挂数据库守卫
 app.use('/api/users', requireDb, require('./routes/users'));
 app.use('/api/knowledge-points', requireDb, require('./routes/knowledgePoints'));
 app.use('/api/audio', audioRouter);
+app.use('/api/ai', require('./routes/ai'));
+app.use('/api/quiz', requireDb, require('./routes/quiz'));
 
 // 健康检查接口
 app.get('/', (req, res) => {
