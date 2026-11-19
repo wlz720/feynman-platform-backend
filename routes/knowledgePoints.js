@@ -4,6 +4,11 @@ const auth = require('../middleware/auth');
 const KnowledgePoint = require('../models/KnowledgePoint');
 const { sendDbAwareError } = require('../middleware/dbGuard');
 const { sanitizeMarkdown, sanitizeTitle } = require('../utils/sanitizeMarkdown');
+// 课时10：创建/更新知识点时自动向量化入库，删除时同步清理向量
+const {
+  addKnowledgePointToStore,
+  removeKnowledgePointFromStore
+} = require('../services/vectorStoreService');
 
 const MAX_TITLE_CHARS = 200;
 const MAX_CONTENT_CHARS = 100000;
@@ -41,6 +46,8 @@ router.post('/', auth, async (req, res) => {
       user: req.user.id
     });
     const kp = await newKp.save();
+    // 异步索引，无需等待向量化完成即可返回，提升体验（失败只记日志）
+    addKnowledgePointToStore(kp);
     res.json(kp);
   } catch (err) {
     sendDbAwareError(res, err, 'Server Error');
@@ -108,7 +115,12 @@ router.put('/:id', auth, async (req, res) => {
       return res.status(400).json({ msg: '没有需要更新的字段' });
     }
 
+    const previousContent = kp.content;
     kp = await KnowledgePoint.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
+    // 内容发生变化时才重新索引（服务内部会先删旧块再加新块）
+    if (kp.content !== previousContent) {
+      addKnowledgePointToStore(kp);
+    }
     res.json(kp);
   } catch (err) {
     sendDbAwareError(res, err, 'Server Error');
@@ -126,6 +138,7 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(401).json({ msg: 'Not authorized' });
     }
     await KnowledgePoint.findByIdAndDelete(req.params.id);
+    removeKnowledgePointFromStore(req.params.id);
     res.json({ msg: 'Knowledge point removed' });
   } catch (err) {
     sendDbAwareError(res, err, 'Server Error');

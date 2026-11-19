@@ -25,8 +25,10 @@ middleware/dbGuard.js           数据库未就绪时快速返回 503，区分�
 models/User.js                  用户模型
 models/KnowledgePoint.js        知识点模型
 controllers/baiduAiController.js  token 获取与缓存、百度识别、大模型润色与评价
+services/vectorStoreService.js  RAG 向量库：文本分割、Embedding、本地存储与相似度检索
 scripts/check-baidu.js          语音凭证与识别自检
 scripts/check-llm.js            大模型凭证、模型权限与完整评价链路自检
+scripts/check-rag.js            RAG 自检：分割 → 向量化 → 入库 → 检索全链路
 ```
 
 ## 快速开始
@@ -53,6 +55,7 @@ node index.js            # http://localhost:3000
 | `QIANFAN_API_KEY` | 可选。千帆大模型应用的 API Key；新版控制台的 `bce-v3/ALTAK-…` 也填这里 |
 | `QIANFAN_SECRET_KEY` | 可选。千帆应用的 Secret Key；填了 `bce-v3` 开头的 Key 时可留空 |
 | `QIANFAN_MODEL` | 可选。模型名，v1 接口默认 `eb-instant`，bce-v3 接口默认 `ernie-5.1` |
+| `EMBEDDING_MODEL` | 可选。RAG 向量化模型名：走 `LLM_*` 通道时默认 `embedding-2`（智谱），走千帆 bce-v3 时默认 `embedding-v1` |
 
 百度语音凭证在控制台「语音技术 → 应用列表」中创建应用后获取，同一页面应同时出现 **AppID、API Key、Secret Key** 三项。注意不要使用「用户中心 → 安全认证」里的 AK/SK，那套无法换取 access_token。
 
@@ -130,9 +133,23 @@ MongoDB Atlas 在本地网络抖动时，驱动选主节点可能耗时数十秒
 - `GET /api/quiz/attempts?knowledgePointId=...&limit=50&onlyWrong=true`：按时间倒序返回 `{ attempts, total, wrongCount }`，`onlyWrong=true` 时只返回答错的记录，供复习页筛选。
 - 复合索引 `{ user, knowledgePoint, createdAt: -1 }` 保证按知识点翻记录时不用全表扫描。
 
+## RAG 私有知识库（课时10：索引基础设施）
+
+创建 / 更新知识点时，后端会自动把正文「分割 → 向量化 → 存入本地向量库」，为课时11 的检索问答做好准备。实现在 `services/vectorStoreService.js`：
+
+1. **技术选型说明**：课件示例是 LangChain.js + `@langchain/baidu-qianfan` + HNSWLib。本项目按课件「LangChain.js 或原生代码」的许可采用原生实现：旧版千帆 SDK 走 AK/SK 换 token，与项目已迁移的 bce-v3 / OpenAI 兼容凭证不匹配；`hnswlib-node` 是 C++ 原生模块，Windows + 新版 Node 常编译失败。原生实现零新增依赖，接口签名与课件一致。
+2. **分割（Split）**：`splitText()` 复刻 RecursiveCharacterTextSplitter 的递归策略——先按段落、再按句子/逗号、最后按字符切，`chunkSize=500`、`chunkOverlap=50`，块间保留重叠保证语义连续；单个知识点最多 60 块，防止超长正文刷爆 Embedding 额度。
+3. **嵌入（Embed）**：`embedTexts()` 优先走 `{LLM_BASE_URL}/embeddings`（智谱 `embedding-2`，1024 维），未配 `LLM_*` 时回退千帆 v2 `/v2/embeddings`（`embedding-v1`）。每批最多 16 块，按返回的 `index` 排序对齐。
+4. **存储（Store）**：向量库是 `vector_store/store.json`（已 gitignore），每块记录 `userId / knowledgePointId / title / text / embedding`。写入串行化 + 临时文件改名，避免并发覆盖或写坏文件。
+5. **自动索引**：`POST /api/knowledge-points` 保存成功后异步调用 `addKnowledgePointToStore()`，不阻塞响应；`PUT` 只在正文变化时重建索引（先删旧块再加新块，比课件 HNSWLib「允许冗余」更干净）；`DELETE` 同步清理向量。索引失败只记日志，不影响知识点保存。
+6. **多用户隔离**：检索时按 `userId` 过滤，用户只能问到自己知识库的内容。
+
 ### 自检
 
 ```bash
+node scripts/check-rag.js                # 分割 → 向量化 → 入库 → 检索全链路（演示数据自动清理）
+node scripts/check-rag.js --stats        # 查看向量库统计
+node scripts/check-rag.js --query "问题"  # 对现有向量库做相似度检索
 node scripts/check-baidu.js              # 只验证语音密钥能否换到 token
 node scripts/check-baidu.js 音频.wav      # 再验证一次识别
 node scripts/check-llm.js                # 验证当前配置的大模型能否调通
