@@ -21,6 +21,7 @@ routes/users.js                 注册 / 登录
 routes/knowledgePoints.js       知识点增删改查（需登录）
 routes/audio.js                 录音上传与识别（需登录）
 routes/graph.js                 知识图谱数据（节点 + 引用边，需登录）
+routes/quiz.js                  测评记录读写（按知识点查询、错题筛选）
 middleware/auth.js              校验请求头 x-auth-token
 middleware/dbGuard.js           数据库未就绪时快速返回 503，区分网络异常与业务错误
 models/User.js                  用户模型
@@ -30,6 +31,9 @@ services/vectorStoreService.js  RAG 向量库：文本分割、Embedding、本�
 scripts/check-baidu.js          语音凭证与识别自检
 scripts/check-llm.js            大模型凭证、模型权限与完整评价链路自检
 scripts/check-rag.js            RAG 自检：分割 → 向量化 → 入库 → 检索全链路
+scripts/check-xss.js            验证入库消毒（代码块保留、恶意标签删除）
+Dockerfile                      课时16 容器镜像（node:20-alpine + 健康检查）
+.dockerignore                   排除 node_modules / .env / vector_store
 ```
 
 ## 快速开始
@@ -38,7 +42,8 @@ scripts/check-rag.js            RAG 自检：分割 → 向量化 → 入库 →
 npm install
 cp .env.example .env     # Windows: copy .env.example .env
 # 编辑 .env，填入下方环境变量
-node index.js            # http://localhost:3000
+npm start                # http://localhost:3000
+npm run dev              # 开发模式（node --watch 自动重启）
 ```
 
 ### 环境变量
@@ -170,6 +175,50 @@ node scripts/check-llm.js --list         # 列出千帆 Key 可用的对话模�
 node scripts/check-llm.js --model glm-4.7-flash --full   # 临时指定模型名
 node scripts/check-xss.js                # 验证入库消毒（代码块保留、恶意标签删除）
 node scripts/check-xss.js --db           # 只读扫描数据库，列出仍含原始 HTML 的旧记录```
+
+## 容器化部署（课时16）
+
+`Dockerfile` 使用 `node:20-alpine`：
+
+1. 先 `COPY package*.json` 再 `npm ci --omit=dev`，利用镜像层缓存，改代码不会重装依赖；
+2. 再 `COPY . .` 复制源码；
+3. `EXPOSE 3000`，`HEALTHCHECK` 请求根路径 `/`（该接口不依赖数据库，容器启动即可探活）；
+4. `CMD ["node", "index.js"]`。
+
+几个与镜像相关的说明：
+
+- 项目实际使用 **bcryptjs（纯 JavaScript）**，已移除未使用的原生 `bcrypt`，Alpine（musl）无需安装 `python3 / make / g++` 也能装完依赖；
+- `.env` 不打进镜像，由 compose 的 `env_file` 注入；
+- `vector_store` 在 `.dockerignore` 中排除，运行时由 compose 挂到命名卷，重建容器不会丢 RAG 索引。
+
+一般由前端仓库的 `docker-compose.yml` 一起启动：
+
+```bash
+# 在本目录准备 .env
+copy .env.example .env
+
+# 到前端目录
+cd ../feynman-platform-frontend
+docker compose up -d --build
+```
+
+也可以单独构建后端镜像：
+
+```bash
+docker build -t feynman-backend .
+docker run -d --name feynman-backend -p 3000:3000 --env-file .env \
+  -v feynman-vector:/app/vector_store feynman-backend
+```
+
+非容器方案（PM2）：
+
+```bash
+npm ci --omit=dev
+npm i -g pm2
+pm2 start index.js --name feynman-backend
+pm2 save
+pm2 startup    # 按提示执行输出的命令，实现开机自启
+```
 
 ## 说明
 

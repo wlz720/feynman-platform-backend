@@ -1,9 +1,12 @@
 {
   "name": "feynman-platform-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "费曼学习平台后端：JWT 认证、知识点 CRUD、语音识别、AI 评价/出题与 RAG 问答",
+  "author": "韦丽珍",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,7 +15,6 @@
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.21.0",
-    "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
