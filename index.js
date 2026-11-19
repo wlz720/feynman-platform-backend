@@ -52,6 +52,8 @@ app.use('/api/knowledge-points', requireDb, require('./routes/knowledgePoints'))
 app.use('/api/audio', audioRouter);
 app.use('/api/ai', require('./routes/ai'));
 app.use('/api/quiz', requireDb, require('./routes/quiz'));
+// 课时12：知识图谱数据（读知识点表，需要数据库就绪）
+app.use('/api/graph', requireDb, require('./routes/graph'));
 
 // 健康检查接口
 app.get('/', (req, res) => {

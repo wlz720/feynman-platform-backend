@@ -20,6 +20,7 @@ index.js                        入口：加载 .env、连接 MongoDB、挂载�
 routes/users.js                 注册 / 登录
 routes/knowledgePoints.js       知识点增删改查（需登录）
 routes/audio.js                 录音上传与识别（需登录）
+routes/graph.js                 知识图谱数据（节点 + 引用边，需登录）
 middleware/auth.js              校验请求头 x-auth-token
 middleware/dbGuard.js           数据库未就绪时快速返回 503，区分网络异常与业务错误
 models/User.js                  用户模型
@@ -80,6 +81,7 @@ node index.js            # http://localhost:3000
 | POST | `/api/ai/generate-question` | 请求体 `{ knowledgePointContent, difficulty, type? }`，`difficulty` 为 `基础 / 中等 / 困难`，`type` 为 `single-choice`（默认）或 `short-answer`，返回结构化题目 |
 | POST | `/api/ai/grade-answer` | 请求体 `{ question, answerKeyPoints, studentAnswer }`，返回 `{ isCorrect, explanation, studentAnswer }` |
 | POST | `/api/ai/rag-qa` | 课时11。请求体 `{ question }`（≤500 字），基于当前用户向量库检索后由大模型作答，返回 `{ answer, sources }`，`sources` 为引用的知识点（含相似度与摘要） |
+| GET | `/api/graph/knowledge-map` | 课时12。返回知识图谱 `{ nodes, links }`：节点含 `id/name/value/symbolSize/status/reviewList/createdAt`；A 正文包含 B 标题（≥2 字）即生成 A→B 引用边 |
 
 知识点接口会对入参做边界校验：`title` 必须是 1–200 字、`content` 必须是 1–10 万字的字符串，`status` 只接受 `not_started / need_review / mastered`，不符合返回 400。写入前还会经过 `utils/sanitizeMarkdown.js` 做存储侧消毒：删除代码块之外的原始 HTML（`<script>`、`<iframe>`、带 `onerror` 的标签等），因此恶意载荷不会进入数据库；围栏代码块、行内代码、自动链接、引用块和 LaTeX 公式保持原样，避免把教学示例也一并删掉。渲染时前端还会用 `react-markdown` + `DOMPurify` 再消毒一次，形成「入库 + 渲染」两层防护。
 
