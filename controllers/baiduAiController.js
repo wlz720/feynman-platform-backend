@@ -391,7 +391,17 @@ function resolveGenericLlm() {
   return { baseUrl, apiKey, model: (process.env.LLM_MODEL || '').trim() };
 }
 
-async function callOpenAiCompatible({ baseUrl, apiKey, model }, prompt) {
+// 统一把入参规整成 OpenAI 风格的 messages 数组：兼容旧的“只传一段 prompt 字符串”调用
+function toChatMessages(input) {
+  if (Array.isArray(input)) {
+    return input
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant' || m.role === 'system') && typeof m.content === 'string')
+      .map((m) => ({ role: m.role, content: m.content }));
+  }
+  return [{ role: 'user', content: String(input || '') }];
+}
+
+async function callOpenAiCompatible({ baseUrl, apiKey, model }, messages) {
   if (!model) {
     const err = new Error('未配置 LLM_MODEL（例如 glm-4.7-flash）');
     err.code = 'NO_CREDENTIAL';
@@ -401,7 +411,7 @@ async function callOpenAiCompatible({ baseUrl, apiKey, model }, prompt) {
     `${baseUrl}/chat/completions`,
     {
       model,
-      messages: [{ role: 'user', content: prompt }],
+      messages,
       temperature: 0.2
     },
     {
@@ -421,10 +431,25 @@ async function callOpenAiCompatible({ baseUrl, apiKey, model }, prompt) {
   return content;
 }
 
-async function callChatModel(prompt) {
+// 千帆 v1（access_token 通道）的 messages 只认 user/assistant，把 system 内容并入首条 user 消息
+function adaptMessagesForV1(messages) {
+  const systemParts = messages.filter((m) => m.role === 'system').map((m) => m.content);
+  const rest = messages.filter((m) => m.role !== 'system');
+  if (!systemParts.length) return rest;
+  const firstUserIdx = rest.findIndex((m) => m.role === 'user');
+  if (firstUserIdx === -1) return [{ role: 'user', content: systemParts.join('\n\n') }, ...rest];
+  rest[firstUserIdx] = {
+    role: 'user',
+    content: `${systemParts.join('\n\n')}\n\n${rest[firstUserIdx].content}`
+  };
+  return rest;
+}
+
+async function callChatModel(input) {
+  const messages = toChatMessages(input);
   const generic = resolveGenericLlm();
   if (generic) {
-    return callOpenAiCompatible(generic, prompt);
+    return callOpenAiCompatible(generic, messages);
   }
 
   const { apiKey, useBearer } = resolveQianfanCredential();
@@ -439,7 +464,7 @@ async function callChatModel(prompt) {
       QIANFAN_V2_CHAT_URL,
       {
         model: process.env.QIANFAN_MODEL || 'ernie-5.1',
-        messages: [{ role: 'user', content: prompt }],
+        messages,
         temperature: 0.2
       },
       {
@@ -460,7 +485,7 @@ async function callChatModel(prompt) {
   const { data } = await axios.post(
     `${QIANFAN_V1_CHAT_BASE}/${model}`,
     {
-      messages: [{ role: 'user', content: prompt }],
+      messages: adaptMessagesForV1(messages),
       temperature: 0.2
     },
     { params: { access_token: token }, timeout: 60000 }
@@ -929,9 +954,10 @@ exports.gradeAnswer = async (req, res) => {
 
 // ==================== 第十一课：RAG 检索增强问答 ====================
 
-const { queryVectorStore } = require('../services/vectorStoreService');
+const { queryVectorStore, countChunksByUser, reindexUserKnowledgePoints } = require('../services/vectorStoreService');
 
 const MAX_QUESTION_INPUT_CHARS = 500;
+const MAX_HISTORY_TURNS = 6;
 const RAG_TOP_K = 4;
 // 相似度低于该阈值的文本块视为不相关，不送给模型（防止拿无关内容硬答）
 const RAG_MIN_SCORE = 0.35;
@@ -939,26 +965,39 @@ const RAG_MIN_SCORE = 0.35;
 // 遵循课件「大模型上下文协议（MCP）」的结构化 Prompt：
 // 用类 XML 标签明确各部分角色（背景资料 / 用户问题），减少歧义、抑制幻觉。
 // 与课件的 PromptTemplate 等价，这里用函数拼接以便复用 callChatModel 的多通道路由。
-function buildRagPrompt(context, question) {
+function buildRagSystemPrompt(context) {
   return `<role>你是「费曼学习平台」的私有知识库问答机器人。</role>
-<instruction>请只根据下面<context>中提供的资料回答用户的<question>。要求：
+<instruction>请只根据下面<context>中提供的资料回答用户的问题。要求：
 1. 如果<context>中没有与问题相关的信息，就明确回答「知识库中暂无相关内容」，不要编造答案。
 2. 回答简洁明了，用中文，可以使用 Markdown 排版。
 3. 不要提及「上下文」「资料」等内部机制，像老师答疑一样自然作答。</instruction>
 
 <context>
 ${context}
-</context>
-
-<question>
-${question}
-</question>`;
+</context>`;
 }
+
+// 私有笔记未命中时的通用兜底：允许模型用通用知识作答，但必须让前端标注“不来自笔记”
+const GENERAL_FALLBACK_SYSTEM_PROMPT = `<role>你是「费曼学习平台」的学习答疑助手。</role>
+<instruction>用户的私有知识库中没有检索到与当前问题直接相关的笔记，请基于你的通用知识回答。要求：
+1. 用中文回答，简洁清楚，可以使用 Markdown 排版。
+2. 问题超出知识范围或你不确定时，直接说明，不要编造。
+3. 不要提及「上下文」「检索」「知识库」等内部机制，像老师答疑一样自然作答。</instruction>`;
 
 function formatRagDocs(docs) {
   return docs
     .map((doc, i) => `--- 文档 ${i + 1}（来自知识点《${doc.metadata.title}》） ---\n${doc.pageContent}`)
     .join('\n\n');
+}
+
+// 清洗前端带回的历史对话：只保留 user/assistant 文本，截断长度与轮次，避免注入超长内容
+function sanitizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history
+    .filter((item) => item && (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string')
+    .slice(-MAX_HISTORY_TURNS)
+    .map((item) => ({ role: item.role, content: item.content.trim().slice(0, MAX_QUESTION_INPUT_CHARS) }))
+    .filter((item) => item.content);
 }
 
 exports.answerWithRAG = async (req, res) => {
@@ -967,34 +1006,71 @@ exports.answerWithRAG = async (req, res) => {
   if (question.length > MAX_QUESTION_INPUT_CHARS) {
     return res.status(400).json({ msg: `问题过长，请控制在 ${MAX_QUESTION_INPUT_CHARS} 字以内` });
   }
+  const history = sanitizeHistory(req.body?.history);
 
   try {
+    // 0. 库里完全没有当前用户的笔记片段：直接引导先建知识点，不浪费模型调用
+    const userChunkCount = await countChunksByUser(req.user.id);
+    if (userChunkCount === 0) {
+      return res.json({
+        answer:
+          '你的知识库还没有可检索的笔记。先去新建几个知识点并保存，我就能结合你的笔记回答；如果是通用学习问题，也可以直接问我。',
+        sources: [],
+        mode: 'empty'
+      });
+    }
+
     // 1. 检索：问题向量化 → 在当前用户的向量库里找最相关的文本块
     const relevantDocs = await queryVectorStore(question, { userId: req.user.id, k: RAG_TOP_K });
     const usefulDocs = relevantDocs.filter((doc) => doc.score >= RAG_MIN_SCORE);
 
-    // 2. 知识库为空或全都不相关时直接回答，不浪费一次模型调用
-    if (!usefulDocs.length) {
-      return res.json({
-        answer: '知识库中暂无与该问题相关的内容。可以先创建相关知识点，或换个与已有知识点相关的问法。',
-        sources: []
+    let answer;
+    let sources = [];
+    let mode;
+
+    if (usefulDocs.length) {
+      // 2a. 命中笔记：把检索到的文本块、历史对话和问题一起交给大模型（RAG 链的 LCEL 等价实现）
+      const messages = [
+        { role: 'system', content: buildRagSystemPrompt(formatRagDocs(usefulDocs)) },
+        ...history,
+        { role: 'user', content: question }
+      ];
+      answer = await callChatModel(messages);
+      mode = 'rag';
+
+      // 选做优化：返回引用来源，前端展示回答依据了哪些知识点，增加可信度
+      const sourceMap = new Map();
+      usefulDocs.forEach((doc) => {
+        const id = doc.metadata.knowledgePointId;
+        if (!sourceMap.has(id)) {
+          sourceMap.set(id, { knowledgePointId: id, title: doc.metadata.title, score: doc.score, excerpt: doc.pageContent.slice(0, 120) });
+        }
       });
+      sources = [...sourceMap.values()];
+    } else {
+      // 2b. 有笔记但未命中：走通用答疑兜底，不再回固定话术；sources 置空，前端标注“未依据笔记”
+      const messages = [
+        { role: 'system', content: GENERAL_FALLBACK_SYSTEM_PROMPT },
+        ...history,
+        { role: 'user', content: question }
+      ];
+      answer = await callChatModel(messages);
+      mode = 'general';
     }
 
-    // 3. 生成：把检索到的文本块和问题一起交给大模型（RAG 链的 LCEL 等价实现）
-    const answer = await callChatModel(buildRagPrompt(formatRagDocs(usefulDocs), question));
-
-    // 选做优化：返回引用来源，前端展示回答依据了哪些知识点，增加可信度
-    const sourceMap = new Map();
-    usefulDocs.forEach((doc) => {
-      const id = doc.metadata.knowledgePointId;
-      if (!sourceMap.has(id)) {
-        sourceMap.set(id, { knowledgePointId: id, title: doc.metadata.title, score: doc.score, excerpt: doc.pageContent.slice(0, 120) });
-      }
-    });
-
-    return res.json({ answer: String(answer || '').trim(), sources: [...sourceMap.values()] });
+    return res.json({ answer: String(answer || '').trim(), sources, mode });
   } catch (err) {
     return sendLlmError(res, err, '问答', '提问');
+  }
+};
+
+// 重建当前用户的向量索引：修复“保存时向量化失败 / 换机后 store.json 与数据库不一致”导致的检索不到问题
+exports.reindexUserStore = async (req, res) => {
+  try {
+    const knowledgePoints = await KnowledgePoint.find({ user: req.user.id });
+    const result = await reindexUserKnowledgePoints(knowledgePoints);
+    return res.json({ indexed: result.knowledgePoints, chunks: result.chunks });
+  } catch (err) {
+    return sendLlmError(res, err, '重建索引', '同步笔记');
   }
 };

@@ -232,6 +232,49 @@ exports.addKnowledgePointToStore = (knowledgePoint) =>
     console.error('添加到向量库失败:', error.response?.data || error.message);
   });
 
+/** 统计某个用户当前已索引的文本块数量（用于判断知识库是否为空 / 是否需要重建） */
+exports.countChunksByUser = async (userId) => {
+  const store = await loadStore();
+  const uid = String(userId);
+  return store.docs.filter((doc) => doc.userId === uid).length;
+};
+
+/**
+ * 按用户重建向量索引：先清掉该用户的旧块，再把传入的知识点重新分割、向量化入库。
+ * 用于修复“保存时向量化失败导致笔记检索不到”的索引漂移问题。
+ * @param {Array} knowledgePoints Mongo 知识点文档数组
+ * @returns {Promise<{knowledgePoints:number, chunks:number}>}
+ */
+exports.reindexUserKnowledgePoints = (knowledgePoints) =>
+  enqueue(async () => {
+    const list = Array.isArray(knowledgePoints) ? knowledgePoints : [];
+    const userIds = new Set(list.map((kp) => kp.user.toString()));
+    const store = await loadStore();
+    store.docs = store.docs.filter((doc) => !userIds.has(doc.userId));
+
+    let chunks = 0;
+    for (const kp of list) {
+      const pieces = splitText(kp.content);
+      if (!pieces.length) continue;
+      const vectors = await embedTexts(pieces);
+      const userId = kp.user.toString();
+      const kpId = kp._id.toString();
+      pieces.forEach((chunk, i) => {
+        store.docs.push({
+          id: `${kpId}:${i}`,
+          userId,
+          knowledgePointId: kpId,
+          title: kp.title,
+          text: chunk,
+          embedding: vectors[i]
+        });
+      });
+      chunks += pieces.length;
+    }
+    await saveStore(store);
+    return { knowledgePoints: list.length, chunks };
+  });
+
 /** 删除知识点时同步清掉它的向量块 */
 exports.removeKnowledgePointFromStore = (knowledgePointId) =>
   enqueue(async () => {
