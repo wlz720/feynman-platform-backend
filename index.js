@@ -1,6 +1,14 @@
 // 必须放在最顶部：加载.env环境变量
 require('dotenv').config();
 
+// 本机系统 DNS 只指向 127.0.0.1（本地代理/VPN 没在跑）时，Node 的 c-ares 解析
+// mongodb+srv 的 SRV 记录会报 querySrv ECONNREFUSED。需要时用 .env 里的 DNS_SERVERS 兜底。
+const dns = require('dns');
+if (process.env.DNS_SERVERS) {
+  dns.setServers(process.env.DNS_SERVERS.split(',').map((s) => s.trim()).filter(Boolean));
+  console.log('DNS 兜底已启用：', dns.getServers().join(', '));
+}
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
